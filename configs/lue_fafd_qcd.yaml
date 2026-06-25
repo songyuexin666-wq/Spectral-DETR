@@ -1,0 +1,117 @@
+# ==================================================================================
+# Spectral-DETR 主配置文件
+# ==================================================================================
+# 三层可靠性框架 (3 innovations, all flags independently ablatable):
+#
+#   ① DAFD  — Feature Reliability  (频域分解 + 退化估计器)
+#   ② DQCD  — Query Reliability     (退化感知门控评分)
+#   ③ LUE   — Localization & Classification Reliability
+#             ├── LUE core: heteroscedastic Laplace NLL + precision-weighted L1
+#             ├── SCU:      geometric salience calibration (ablation item)
+#             └── IA-BCE:   IoU-aware classification loss (ablation item)
+#
+# DegradationEstimator (共享退化估计器) 在 DAFD 或 DQCD 开启时自动启用，
+# 为二者提供统一的退化表征 (deg_global + spatial_prior)。
+# ==================================================================================
+
+model:
+  encoder: "dinov2_windowed_small"
+  hidden_dim: 256
+  resolution: 560
+  pretrain_weights: "rf-detr-base.pth"
+  patch_size: 14
+  num_queries: 300
+  num_select: 300
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # ① DAFD — Degradation-Aware Frequency Decomposition
+  #    FFT → 3 learnable bands → per-band FiLM + gate → IFFT → cross-band fusion → α-blend
+  #    共享 DegradationEstimator 提供全局退化上下文 (auto-enabled)
+  # ═══════════════════════════════════════════════════════════════════════
+  use_dafd: true
+  dafd_sparsity_weight: 1e-5
+  dafd_alpha: 0.15
+  dafd_n_bands: 3
+  use_degradation_estimator: false
+  dags_start_epoch: 8
+  dags_warmup_epochs: 5
+  dags_bonus_scale: 0.0
+  # Main innovation experiments must keep post-processing identical to baseline.
+  # Soft-NMS can be evaluated separately as an inference-only appendix setting.
+  use_soft_nms: false
+  soft_nms_sigma: 0.5
+  soft_nms_iou_threshold: 0.6
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # ② DQCD — Degradation-adaptive Query Contrastive Denoising
+  #    Positives: same query across decoder layers + same-class matched queries
+  #    Negatives: hard unmatched queries selected by similarity and ambiguity
+  #    Temperature: modulated per image by detached DAFD gate statistics
+  # ═══════════════════════════════════════════════════════════════════════
+  use_dqcd: true
+  dqcd_start_epoch: 8
+  dqcd_warmup_epochs: 5
+  dqcd_temperature: 0.15
+  dqcd_weight: 0.08
+  dqcd_hard_negatives_k: 128
+  dqcd_decay_start_epoch: -1
+  dqcd_decay_epochs: 25
+  dqcd_final_weight: -1.0
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # ③ LUE — Localization & Classification Reliability
+  #    ┌ LUE core:  log-var head → Laplace NLL → precision-weighted L1
+  #    │            adaptive area threshold, warmup blend
+  #    ├ SCU:       geometric salience calibration (消融项, 独立开关)
+  #    └ IA-BCE:    IoU-aware binary cross-entropy (消融项, 独立开关)
+  # ═══════════════════════════════════════════════════════════════════════
+  use_lue: true
+  lue_warmup_epochs: 15       # v5 验证值
+  lue_giou_weighting: false
+  lue_giou_start_epoch: 40
+  lue_giou_warmup_epochs: 5
+
+  # LUE sub-item: SCU (v6 recalibrated for this dataset)
+  use_scu: true
+  scu_salience_weight: 0.1
+  scu_calib_slope: -1.5        # 之前 -3.0 太陡; log_var 收敛在 -5.5 附近
+  scu_calib_center: -4.2       # 之前 0.5 错位; target ≈ -1.5×s -4.2 ∈ [-5.7, -4.2]
+
+  # LUE sub-item: IA-BCE (IoU-aware BCE classification)
+  ia_bce_loss: true
+
+dataset:
+  dataset_file: "coco"
+  coco_path: "datasets"
+
+training:
+  batch_size: 12
+  epochs: 75
+  lr: 1e-4
+  weight_decay: 1e-4
+  lr_drop: 40
+  drop_path: 0.0
+  clip_max_norm: 0.1
+  checkpoint_interval: 20
+  output_dir: "outputs/spectral_detr_v6"
+  use_ema: true
+  ema_decay_effective: 0.99
+  ema_decay: 0.9995            # v5 验证值
+  ema_tau: 100                 # v5 验证值
+  warmup_epochs: 0.0
+  multi_scale: true
+  expanded_scales: true
+
+# Loss 配置
+loss:
+  cls_loss_coef: 2.0
+  bbox_loss_coef: 5.0
+  giou_loss_coef: 5.0
+  lue_uncertainty_coef: 0.5   # v5 log-MSE calibration (always ≥ 0, converges → 0)
+  set_cost_class: 2.0
+  set_cost_bbox: 5.0
+  set_cost_giou: 5.0
+
+eval:
+  eval_interval: 5
+  num_select: 300

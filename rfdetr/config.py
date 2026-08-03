@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 from pydantic import BaseModel
@@ -49,10 +49,15 @@ class ModelConfig(BaseModel):
     dafd_sparsity_weight: float = 0.0
     dafd_alpha: float = 0.15
     dafd_n_bands: int = 3
+    # Encoder taps are zero-based indexes into out_feature_indexes. None applies
+    # DAFD to every tap, preserving the behavior of existing checkpoints.
+    dafd_feature_indices: Optional[List[int]] = None
+    dafd_gate_source_index: Optional[int] = None
     use_dqcd: bool = False
     dqcd_temperature: float = 0.15
     dqcd_weight: float = 0.3
     dqcd_hard_negatives_k: int = 128
+    dqcd_gate_mode: Literal["adaptive", "fixed", "shuffled", "random"] = "adaptive"
     dqcd_start_epoch: int = 8
     dqcd_warmup_epochs: int = 0
     dqcd_decay_start_epoch: int = -1
@@ -66,10 +71,6 @@ class ModelConfig(BaseModel):
     use_soft_nms: bool = False
     soft_nms_sigma: float = 0.5
     soft_nms_iou_threshold: float = 0.5
-    use_lue_quality_score: bool = False
-    lue_quality_gamma: float = 0.25
-    lue_quality_center: float = -5.0
-    lue_quality_max_delta: float = 4.0
     scu_salience_weight: float = 0.1
     scu_calib_slope: float = -1.5
     scu_calib_center: float = -4.2
@@ -211,6 +212,7 @@ class TrainConfig(BaseModel):
     diagnostics_max_images: int = 4
     diagnostics_benchmark: bool = False
     diagnostics_buckets: Optional[dict] = None
+    diagnostics_sample_records: bool = False
     # Runtime / reproducibility (passed through from train_mine.py)
     num_classes: int = 90
     resolution: int = 560

@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """
@@ -20,6 +20,7 @@ from rfdetr.datasets.coco_eval import CocoEvaluator
 from rfdetr.datasets.coco import compute_multi_scale_scales
 from rfdetr.util.diagnostics import DiagnosticsWriter
 from rfdetr.util.degradation import compute_degradation_scores, bucketize
+from rfdetr.util import box_ops
 
 try:
     from torch.amp import autocast, GradScaler
@@ -36,6 +37,50 @@ def get_autocast_args(args):
         return {'enabled': args.amp, 'dtype': torch.bfloat16}
     else:
         return {'device_type': 'cuda', 'enabled': args.amp, 'dtype': torch.bfloat16}
+
+
+def _per_image_localization_difficulty(target, result):
+    """Measure localization difficulty as one minus mean best same-class IoU."""
+    target_boxes = target["boxes"]
+    if target_boxes.numel() == 0:
+        return 0.0, 0.0
+
+    orig_h, orig_w = target["orig_size"].tolist()
+    scale = target_boxes.new_tensor([orig_w, orig_h, orig_w, orig_h])
+    target_xyxy = box_ops.box_cxcywh_to_xyxy(target_boxes) * scale
+    pred_boxes = result["boxes"]
+    pred_labels = result["labels"]
+    pred_scores = result["scores"]
+    keep = pred_scores >= 0.05
+    pred_boxes = pred_boxes[keep]
+    pred_labels = pred_labels[keep]
+
+    best_ious = []
+    for box, label in zip(target_xyxy, target["labels"]):
+        same_class = pred_boxes[pred_labels == label]
+        if same_class.numel() == 0:
+            best_ious.append(box.new_tensor(0.0))
+            continue
+        ious, _ = box_ops.box_iou(box.unsqueeze(0), same_class)
+        best_ious.append(ious.max())
+    best_ious = torch.stack(best_ious)
+    return (
+        float(1.0 - best_ious.mean().item()),
+        float((best_ious < 0.5).float().mean().item()),
+    )
+
+
+def _float_output_tensors(value):
+    """Convert nested floating-point model outputs to float32 for evaluation."""
+    if isinstance(value, torch.Tensor):
+        return value.float() if value.is_floating_point() else value
+    if isinstance(value, dict):
+        return {key: _float_output_tensors(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_float_output_tensors(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_float_output_tensors(item) for item in value)
+    return value
 
 
 def train_one_epoch(
@@ -68,7 +113,7 @@ def train_one_epoch(
     header = "Epoch: [{}]".format(epoch)
     print_freq = 10
     start_steps = epoch * num_training_steps_per_epoch
-    
+
     # 🛠️ 设置当前epoch到criterion/LUE/DAGS warm-up策略
     if hasattr(criterion, 'set_epoch'):
         criterion.set_epoch(epoch)
@@ -90,7 +135,7 @@ def train_one_epoch(
     assert batch_size % args.grad_accum_steps == 0
     sub_batch_size = batch_size // args.grad_accum_steps
     print("LENGTH OF DATA LOADER:", len(data_loader))
-    
+
     for data_iter_step, (samples, targets) in enumerate(
         metric_logger.log_every(data_loader, print_freq, header)
     ):
@@ -221,7 +266,7 @@ def train_one_epoch(
                     except Exception:
                         pass
 
-                # LUE/QCD plots
+                # LUE/DQCD plots
                 try:
                     payload = criterion.pop_diagnostics_payload()
                     if "lue_err" in payload and "lue_logvar" in payload:
@@ -342,6 +387,10 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
 
     bucket_evaluators = {}
     bucket_sizes = {}
+    sample_diagnostics = []
+    record_samples = bool(
+        args is not None and getattr(args, "diagnostics_sample_records", False)
+    )
     if args is not None and getattr(args, "diagnostics_buckets", None) and base_ds is not None:
         bucket_cfg = args.diagnostics_buckets
         brightness_thr = bucket_cfg.get("brightness", [0.3, 0.6])
@@ -372,18 +421,7 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             outputs = model(samples)
 
         if args.fp16_eval:
-            for key in outputs.keys():
-                if key == "enc_outputs":
-                    for sub_key in outputs[key].keys():
-                        outputs[key][sub_key] = outputs[key][sub_key].float()
-                elif key == "aux_outputs":
-                    for idx in range(len(outputs[key])):
-                        for sub_key in outputs[key][idx].keys():
-                            outputs[key][idx][sub_key] = outputs[key][idx][
-                                sub_key
-                            ].float()
-                else:
-                    outputs[key] = outputs[key].float()
+            outputs = _float_output_tensors(outputs)
 
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
@@ -407,33 +445,47 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results_all = postprocess(outputs, orig_target_sizes)
-        
-        # =============== 修复类别ID偏移问题 ===============
-        # COCO格式标注文件使用1-based类别ID (1, 2, 3, ...)
-        # 但训练时coco.py会将ID转换为0-based (0, 1, 2, ...)
-        # 评估时需要将预测结果的类别ID加1，以匹配COCO评估器的期望
-        # 判断方法：检查args中是否有相关信息，或者通过base_ds判断
-        # 如果base_ds的categories ID从1开始，则需要加1
-        need_id_offset = False
-        if hasattr(args, 'dataset_file') and args.dataset_file == "coco":
-            # COCO格式通常需要ID偏移
-            need_id_offset = True
-        elif base_ds is not None and hasattr(base_ds, 'coco'):
-            # 检查base_ds中的categories ID范围
-            try:
-                cat_ids = [cat['id'] for cat in base_ds.coco.cats.values()]
-                if cat_ids and min(cat_ids) >= 1:
-                    need_id_offset = True
-            except:
-                pass
-        
-        if need_id_offset:
-            # 将预测结果的类别ID从0-based转换为1-based
-            for result in results_all:
-                if 'labels' in result:
-                    result['labels'] = result['labels'] + 1
-        # ================================================
-        
+
+        if record_samples:
+            degradation_scores = compute_degradation_scores(samples.tensors)
+            gate_means = None
+            band_gates = outputs.get("dafd_band_gates")
+            if band_gates:
+                gate_means = torch.stack([
+                    gate.detach().float().mean(dim=(1, 2, 3))
+                    for gate in band_gates
+                ]).mean(dim=0)
+            for index, (target, result) in enumerate(zip(targets, results_all)):
+                localization_error, miss_rate = _per_image_localization_difficulty(
+                    target, result
+                )
+                record = {
+                    "image_id": int(target["image_id"].item()),
+                    "brightness": float(degradation_scores["brightness"][index]),
+                    "contrast": float(degradation_scores["contrast"][index]),
+                    "blur": float(degradation_scores["blur"][index]),
+                    "localization_error": localization_error,
+                    "miss_rate_iou50": miss_rate,
+                    "gate_mean": (
+                        float(gate_means[index]) if gate_means is not None else None
+                    ),
+                    "mean_uncertainty": (
+                        float(result["uncertainty"].float().mean())
+                        if result.get("uncertainty") is not None
+                        and result["uncertainty"].numel() > 0
+                        else None
+                    ),
+                }
+                if "controlled_degradation_type" in target:
+                    record["controlled_degradation_type"] = int(
+                        target["controlled_degradation_type"].item()
+                    )
+                if "controlled_degradation_severity" in target:
+                    record["controlled_degradation_severity"] = float(
+                        target["controlled_degradation_severity"].item()
+                    )
+                sample_diagnostics.append(record)
+
         res = {
             target["image_id"].item(): output
             for target, output in zip(targets, results_all)
@@ -468,6 +520,11 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    if record_samples:
+        gathered_records = utils.all_gather(sample_diagnostics)
+        stats["diagnostics_sample_records"] = [
+            record for rank_records in gathered_records for record in rank_records
+        ]
     if bucket_evaluators:
         bucket_results = {}
         for name, evaluator in bucket_evaluators.items():

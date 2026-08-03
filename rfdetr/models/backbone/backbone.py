@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """
@@ -54,6 +54,8 @@ class Backbone(BackboneBase):
                  dafd_sparsity_weight: float = 0.0,
                  dafd_alpha: float = 0.15,
                  dafd_n_bands: int = 3,
+                 dafd_feature_indices: list[int] | None = None,
+                 dafd_gate_source_index: int | None = None,
                  use_degradation_estimator: bool = False,  # 🚀 v6: 共享退化估计器
                  **_unused_kwargs,
                  ):
@@ -111,9 +113,11 @@ class Backbone(BackboneBase):
             dafd_sparsity_weight=dafd_sparsity_weight,
             dafd_alpha=dafd_alpha,
             dafd_n_bands=dafd_n_bands,
+            dafd_feature_indices=dafd_feature_indices,
+            dafd_gate_source_index=dafd_gate_source_index,
         )
 
-        # 🚀 v6.0: 共享退化估计器 (DAFD/DQCD/LUE 的统一退化表征)
+        # 🚀 v6.0: 共享退化估计器 (DAFD/DDQCD/LUE 的统一退化表征)
         self.use_degradation_estimator = use_degradation_estimator
         if use_degradation_estimator:
             self.degradation_estimator = DegradationEstimator()

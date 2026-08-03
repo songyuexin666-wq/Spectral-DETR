@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """
@@ -60,7 +60,23 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
         self.include_masks = include_masks
-        self.prepare = ConvertCoco(include_masks=include_masks)
+        category_ids = sorted(self.coco.getCatIds())
+        if not category_ids:
+            raise ValueError(f"No categories found in COCO annotations: {ann_file}")
+        self.category_id_to_label = {
+            category_id: label for label, category_id in enumerate(category_ids)
+        }
+        self.label_to_category_id = {
+            label: category_id
+            for category_id, label in self.category_id_to_label.items()
+        }
+        # Keep the mapping with the COCO API object returned for evaluation.
+        self.coco.category_id_to_label = self.category_id_to_label.copy()
+        self.coco.label_to_category_id = self.label_to_category_id.copy()
+        self.prepare = ConvertCoco(
+            include_masks=include_masks,
+            category_id_to_label=self.category_id_to_label,
+        )
 
     def __getitem__(self, idx):
         img, target = super(CocoDetection, self).__getitem__(idx)
@@ -74,8 +90,9 @@ class CocoDetection(torchvision.datasets.CocoDetection):
 
 class ConvertCoco(object):
 
-    def __init__(self, include_masks=False):
+    def __init__(self, include_masks=False, category_id_to_label=None):
         self.include_masks = include_masks
+        self.category_id_to_label = category_id_to_label
 
     def __call__(self, image, target):
         w, h = image.size
@@ -94,30 +111,17 @@ class ConvertCoco(object):
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
 
-        classes = [obj["category_id"] for obj in anno]
+        category_ids = [obj["category_id"] for obj in anno]
+        if self.category_id_to_label is None:
+            classes = category_ids
+        else:
+            unknown_ids = sorted(set(category_ids) - self.category_id_to_label.keys())
+            if unknown_ids:
+                raise ValueError(
+                    f"Annotations reference category IDs absent from categories: {unknown_ids}"
+                )
+            classes = [self.category_id_to_label[category_id] for category_id in category_ids]
         classes = torch.tensor(classes, dtype=torch.int64)
-        
-        # COCO 格式中 category_id 通常从 1 开始，但模型期望 0-based 索引
-        # 需要转换为 0-based（category_id - 1）
-        # 更健壮的转换：检查最小值来决定是否需要转换
-        if classes.numel() > 0:
-            min_class_id = classes.min().item()
-            max_class_id = classes.max().item()
-            # 如果最小值>=1，说明是1-based，需要转换为0-based
-            if min_class_id >= 1:
-                classes = classes - 1  # 转换为 0-based: 1->0, 2->1, ..., 5->4
-                # 调试信息（仅在首次遇到时打印，避免日志过多）
-                if not hasattr(ConvertCoco, '_class_conversion_logged'):
-                    print(f"[COCO Dataset] 类别ID转换: {min_class_id}-{max_class_id} -> {min_class_id-1}-{max_class_id-1} (1-based -> 0-based)")
-                    ConvertCoco._class_conversion_logged = True
-            elif min_class_id == 0:
-                # 类别ID从0开始，已经是0-based，无需转换
-                if not hasattr(ConvertCoco, '_class_conversion_logged'):
-                    print(f"[COCO Dataset] 类别ID已经是0-based ({min_class_id}-{max_class_id})，无需转换")
-                    ConvertCoco._class_conversion_logged = True
-            else:
-                # 异常情况：负数类别ID
-                print(f"[WARNING] 异常的类别ID范围: {min_class_id} ~ {max_class_id}")
 
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
@@ -252,14 +256,14 @@ def build(image_set, args, resolution):
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
     image_set_key = image_set.split("_")[0]
-    
+
     # 尝试多种路径组合，按优先级顺序
     # 1. 标准COCO格式: train2017/val2017 + annotations/instances_train2017.json
     # 2. 简化COCO格式: train/val + annotations/instances_train.json (用户的数据集格式)
-    
+
     img_folder = None
     ann_file = None
-    
+
     # 首先尝试标准COCO格式
     if image_set_key == "train":
         img_folder = root / "train2017"
@@ -270,7 +274,7 @@ def build(image_set, args, resolution):
     elif image_set_key == "test":
         img_folder = root / "test2017"
         ann_file = root / "annotations" / f'image_info_test-dev2017.json'
-    
+
     # 如果标准格式不存在，尝试简化格式
     if not (img_folder.exists() and ann_file.exists()):
         if image_set_key == "train":
@@ -282,7 +286,7 @@ def build(image_set, args, resolution):
         elif image_set_key == "test":
             img_folder = root / "test"
             ann_file = root / "annotations" / f'image_info_test-dev.json'
-    
+
     # 如果还是不存在，检查标注文件是否存在（图片路径可能通过标注文件确定）
     if not ann_file.exists():
         # 尝试其他可能的标注文件路径
@@ -292,14 +296,14 @@ def build(image_set, args, resolution):
             ann_file = root / "annotations" / f'{mode}_val.json'
         elif image_set_key == "test":
             ann_file = root / "annotations" / f'image_info_test-dev.json'
-    
+
     if not ann_file.exists():
         raise FileNotFoundError(
             f'无法找到标注文件。尝试的路径：\n'
             f'  标准格式: {root / "annotations" / f"{mode}_{image_set_key}2017.json"}\n'
             f'  简化格式: {root / "annotations" / f"{mode}_{image_set_key}.json"}'
         )
-    
+
     # 如果图片目录不存在，尝试从标注文件所在目录推断
     if not img_folder.exists():
         # 尝试 train/val 目录
@@ -309,22 +313,22 @@ def build(image_set, args, resolution):
             img_folder = root / "val"
         elif image_set_key == "test":
             img_folder = root / "test"
-        
+
         # 如果还是不存在，使用标注文件的父目录（对于某些特殊结构）
         if not img_folder.exists():
             img_folder = ann_file.parent
-    
+
     try:
         square_resize = args.square_resize
     except:
         square_resize = False
-    
+
     try:
         square_resize_div_64 = args.square_resize_div_64
     except:
         square_resize_div_64 = False
 
-    
+
     if square_resize_div_64:
         dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(
             image_set,
@@ -356,25 +360,25 @@ def build_roboflow(image_set, args, resolution):
         "val": (root /  "valid", root / "valid" / "_annotations.coco.json"),
         "test": (root / "test", root / "test" / "_annotations.coco.json"),
     }
-    
+
     img_folder, ann_file = PATHS[image_set.split("_")[0]]
-    
+
     try:
         square_resize = args.square_resize
     except:
         square_resize = False
-    
+
     try:
         square_resize_div_64 = args.square_resize_div_64
     except:
         square_resize_div_64 = False
-    
+
     try:
         include_masks = args.segmentation_head
     except:
         include_masks = False
 
-    
+
     if square_resize_div_64:
         dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(
             image_set,

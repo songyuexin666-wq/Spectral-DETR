@@ -1,0 +1,78 @@
+# Ablation with identical Soft-NMS post-processing: DAFD + DQCD + LUE core.
+
+model:
+  encoder: "dinov2_windowed_small"
+  hidden_dim: 256
+  resolution: 560
+  pretrain_weights: "rf-detr-base.pth"
+  patch_size: 14
+  num_queries: 300
+  num_select: 300
+
+  use_dafd: true
+  dafd_sparsity_weight: 1e-5
+  dafd_alpha: 0.15
+  dafd_n_bands: 3
+  dafd_feature_indices: [0, 1, 2, 3]
+  dafd_gate_source_index: 0
+  use_degradation_estimator: false
+  dags_start_epoch: 8
+  dags_warmup_epochs: 5
+  dags_bonus_scale: 0.0
+
+  use_dqcd: true
+  dqcd_start_epoch: 8
+  dqcd_warmup_epochs: 5
+  dqcd_temperature: 0.15
+  dqcd_weight: 0.08
+  dqcd_hard_negatives_k: 128
+  dqcd_gate_mode: "adaptive"
+  dqcd_decay_start_epoch: -1
+  dqcd_decay_epochs: 25
+  dqcd_final_weight: -1.0
+
+  use_lue: true
+  lue_warmup_epochs: 15
+  lue_giou_weighting: false
+  lue_giou_start_epoch: 40
+  lue_giou_warmup_epochs: 5
+  use_scu: false
+  ia_bce_loss: false
+
+  use_soft_nms: true
+  soft_nms_sigma: 0.5
+  soft_nms_iou_threshold: 0.6
+
+dataset:
+  dataset_file: "coco"
+  coco_path: "datasets"
+
+training:
+  batch_size: 12
+  epochs: 75
+  lr: 1e-4
+  weight_decay: 1e-4
+  lr_drop: 40
+  clip_max_norm: 0.1
+  checkpoint_interval: 25
+  output_dir: "outputs/ablation_softnms_dafd_dqcd_lue"
+  use_ema: true
+  ema_decay_effective: 0.99
+  ema_decay: 0.9995
+  ema_tau: 100
+  warmup_epochs: 0.0
+  multi_scale: true
+  expanded_scales: true
+
+loss:
+  cls_loss_coef: 2.0
+  bbox_loss_coef: 5.0
+  giou_loss_coef: 5.0
+  lue_uncertainty_coef: 0.5
+  set_cost_class: 2.0
+  set_cost_bbox: 5.0
+  set_cost_giou: 5.0
+
+eval:
+  eval_interval: 5
+  num_select: 300

@@ -1,11 +1,11 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 """
 DegradationEstimator — shared, lightweight module that predicts per-image
 degradation characteristics from raw pixel input.  Its outputs feed all
-downstream reliability modules (DAFD / DQCD / LUE), giving them a unified
+downstream reliability modules (DAFD / DDQCD / LUE), giving them a unified
 degradation representation instead of each module estimating degradation
 independently.
 
@@ -31,7 +31,7 @@ class DegradationEstimator(nn.Module):
         [darkness, blur_severity, dust_noise, clutter_level]
     spatial_prior : (B, 1, H/8, W/8) ∈ [0,1]
         Per-pixel "detectability" — low in degraded regions, high in clean regions.
-        Used by DQCD (query scoring) and LUE+ (multi-scale boost).
+        Used by DDQCD (query scoring) and LUE+ (multi-scale boost).
     feat : (B, C_deg, H/8, W/8)
         Intermediate features, available for downstream FiLM conditioning.
     """

@@ -1,260 +1,205 @@
-# Spectral-DETR: Robust Object Detection in Degraded Mine Scenes
+# Spectral-DETR
 
-**Spectral-DETR** 是在 [RF-DETR](https://github.com/roboflow/rf-detr) 基础上扩展的目标检测框架，面向 **矿井下粉尘、模糊、低照度** 等严重退化成像场景。  
-通过 **频域特征净化（FAFD）**、**Query 对比去噪（QCD）** 和 **定位不确定性估计（LUE）** 三个模块，在不依赖独立图像增强网络的前提下，提升 DETR 类检测器的鲁棒性与可解释性。
+Spectral-DETR is a detector-internal reliability framework for object detection in degraded underground mine scenes. It is built on RF-DETR with a DINOv2-Small backbone and adds three reliability-oriented components:
 
-- 代码仓库（Spectral-DETR）：`https://github.com/songyuexin666-wq/Sprectral-DETR`  
-- 自建数据集（Mine-Objects）：`https://github.com/songyuexin666-wq/mine-datasets`
+- **DAFD** — Degradation-Aware Frequency Decomposition for feature reliability.
+- **DQCD** — Degradation-adaptive Query Contrastive Denoising for query reliability.
+- **SCU + LUE** — Salience-Calibrated Uncertainty with Learned Uncertainty Estimation for localization reliability.
 
----
+The project accompanies the revised manuscript submitted to *Journal of Imaging*. The repository is intended to make the method implementation, dataset conversion utilities, evaluation scripts, and final configuration files publicly inspectable.
 
-## 1. 项目简介
+## Method Overview
 
-在实际矿井监控场景中，存在以下典型退化因素：
+Spectral-DETR addresses three failure points common in low-illumination, dusty, blurry, and cluttered mine imagery:
 
-- 粉尘 / 烟雾导致的高频噪声；
-- 照度不足和强对比度变化；
-- 车载摄像头引入的运动模糊和抖动。
+1. **Feature corruption**: DAFD applies learnable frequency-band decomposition, per-band FiLM conditioning, reliability gating, IFFT reconstruction, and residual spatial fusion before the multi-scale projection stage.
+2. **Query entanglement**: DQCD applies a supervised contrastive objective over decoder query embeddings. Its InfoNCE temperature is modulated by DAFD gate statistics. DQCD is used only during training and adds no inference cost.
+3. **Localization under-optimization**: LUE predicts coordinate-level log-variance, while SCU calibrates uncertainty using geometric salience. The calibrated uncertainty precision-weights the L1 localization term for small/medium objects while retaining standard GIoU supervision.
 
-传统 DETR/RF-DETR 在这些场景下容易出现：
+The core contribution is the cross-stage reliability pathway linking frequency processing, query regularization, and uncertainty-guided localization. Individual operators such as FFT filtering, contrastive learning, and uncertainty regression are established techniques; Spectral-DETR adapts and couples them inside a DETR-style detector for degraded underground detection.
 
-- 特征被噪声淹没、注意力失效；
-- 解码器 Query 前景/背景混淆；
-- 边界模糊样本上定位梯度不稳定。
-
-**Spectral-DETR** 针对上述问题，从 **特征、Query 和定位** 三个阶段同时改进 RF-DETR：
-
-![Dataset and inference overview](figures/dataset_distribution.png)
-
-> 上图：左列为自建 Mine-Objects 数据集代表场景，中列为 ScienceDB Mine，右列为 ExDark 低照度场景。
-
-- **FAFD（Frequency-Aware Feature Disentanglement）**  
-  在 Transformer 编码前对多尺度特征做 2D FFT；利用退化条件驱动的频域门控削弱噪声主导频段，保留结构语义，再通过残差方式与原特征融合，减轻谱混叠与伪边缘。
-
-- **QCD（Query Contrastive Denoising）**  
-  在解码阶段对 decoder query 施加监督对比约束：  
-  以最终层匹配 Query 为锚点，跨层同一 Query 为正样本，歧义背景 Query 为难负样本，提升前景/背景可分性。仅在训练时启用，对推理无额外开销。
-
-- **LUE（Localization Uncertainty Estimation）**  
-  对每个框预测坐标均值与 log-variance，用不确定性自适应加权定位梯度，并对预测不确定性与真实误差做校准。输出可解释的“每框可靠性”指标，便于安全场景下的人工复核与告警策略。
-
-![Qualitative comparison of baseline vs. Spectral-DETR](figures/qualitative_comparison.png)
-
-> 上图：从上到下分别为输入图像、基线 RF-DETR 结果、Spectral-DETR 结果。可以看到在粉尘、低照和模糊场景下，Spectral-DETR 能够更稳定地检测弱目标并给出更准确的边界。
-
----
-
-## 2. 数据集说明
-
-### 2.1 自建 Mine-Objects 数据集（3081 张，14 类）
-
-仓库地址：[`mine-datasets`](https://github.com/songyuexin666-wq/mine-datasets)  
-
-- **场景**：真实地下矿井巷道，车载防爆摄像头采集，存在明显的昏暗、模糊、粉尘等退化因素。
-- **数量**：3,081 张高分辨率图像，按 `train / val / test` 划分。
-- **类别数**：14 个矿井相关类别：
-
-  1. `person` – 井下人员  
-  2. `redlight` – 红色信号灯 / 报警灯  
-  3. `light` – 普通照明灯  
-  4. `port` – 接口 / 端口（电缆接口等）  
-  5. `sign` – 标志牌 / 警示牌  
-  6. `warn` – 其他警告设施  
-  7. `gear` – 齿轮 / 机械转动部件  
-  8. `car` – 车辆（非专用矿车）  
-  9. `mine-car` – 矿车 / 轨道车  
-  10. `ele-warn` – 电气警示装置  
-  11. `camera` – 监控摄像头  
-  12. `generator` – 发电机 / 电力设备  
-  13. `annihilator` – 灭火器 / 灭火装置  
-  14. `electric-wire` – 电缆 / 电线  
-
-- **标注格式**：提供适配 COCO/YOLO 的标注文件，可直接用于 Spectral-DETR 与常见检测器。
-
-> 更详细的数据集结构与使用方式，请见数据集仓库 [`mine-datasets`](https://github.com/songyuexin666-wq/mine-datasets) 的 README。
-
-### 2.2 ScienceDB Mine 数据集（跨域评估）
-
-- 平台入口：`https://www.scidb.cn/`（ScienceDB，中国科学院科学数据库）  
-- 使用方式：在 ScienceDB 平台上根据论文中的引用信息或“mine / underground / coal mine”等关键字检索相应矿山场景数据集。  
-- 用途：作为 **跨域矿山场景**，评估 Spectral-DETR 在不同传感器与地质条件下的泛化能力。
-
-> 在正式论文中建议给出具体数据集 DOI 或 ScienceDB 数据集页面链接，这里在 README 中提供平台入口，方便读者自行检索。
-
-### 2.3 ExDark 数据集（低照度场景）
-
-- 官方 GitHub：`https://github.com/cs-chan/Exclusively-Dark-Image-Dataset`  
-- 特点：7,363 张极低照度图像，覆盖 10 种光照条件和 12 个物体类别。  
-- 用途：验证 Spectral-DETR 在 **极低信噪比夜间/暗光场景** 下的鲁棒性，与 Mine-Objects 形成互补。
-
----
-
-## 3. 环境与安装
-
-### 3.1 克隆仓库
-
-```bash
-git clone https://github.com/songyuexin666-wq/Sprectral-DETR.git
-cd Sprectral-DETR
-```
-
-### 3.2 创建环境并安装依赖
-
-建议使用 Python ≥ 3.9，CUDA 版本与 PyTorch 官方支持对应。
-
-```bash
-pip install -r requirements.txt
-```
-
-`requirements.txt` 中包含：
-
-- 深度学习框架：`torch`, `torchvision`, `transformers`, `peft`, `supervision`
-- 训练与配置：`numpy`, `pyyaml`, `pydantic`, `tensorboard`, `wandb`, `torchinfo`
-- COCO 与图像处理：`pycocotools`, `Pillow`, `tqdm`, `matplotlib`, `scikit-learn`
-- 可选部署组件（ONNX / TensorRT 等）
-
-如果暂时不需要 TensorRT/ONNX 部署，可自行从 `requirements.txt` 中删除相关依赖。
-
----
-
-## 4. 快速开始：在 Mine-Objects 上训练
-
-### 4.1 准备数据集
-
-1. 下载并解压自建数据集：[`mine-datasets`](https://github.com/songyuexin666-wq/mine-datasets)  
-2. 假设你的目录结构为：
+## Repository Structure
 
 ```text
-/path/to/mine-datasets/
-├── train/ ...
-├── val/   ...
-└── test/  ...
+.
+├── rfdetr/                         # RF-DETR-based model code with Spectral-DETR modules
+│   ├── main.py                     # Training/evaluation entry points and argument population
+│   ├── config.py                   # Model and module configuration definitions
+│   ├── engine.py                   # Training/evaluation loop
+│   ├── models/
+│   │   └── backbone/projector.py   # DAFD and multi-scale projection integration
+│   └── util/                       # Metrics, diagnostics, degradation utilities, checkpoints
+├── configs/                        # Baseline and ablation YAML configurations
+├── tools/                          # Table generation, ScienceDB evaluation, figure export helpers
+├── scripts/                        # Analysis and visualization helpers
+├── train_mine.py                   # YAML-driven training script for mine datasets
+├── eval_test.py                    # Test-set evaluation from a trained checkpoint
+├── benchmark_fps.py                # Batch-1 pure-forward FPS benchmark
+├── convert_to_coco.py              # Mine-Objects conversion utility
+├── convert_exdark_to_coco.py       # ExDark conversion utility
+└── data.py                         # Dataset metadata and split helpers
 ```
 
-### 4.2 配置文件
+## Installation
 
-本仓库提供两份示例配置：
-
-- `configs/baseline.yaml`  
-  - 基于 RF-DETR 的 **纯基线配置**，关闭 LUE / FAFD / QCD，用于消融对比。
-
-- `configs/lue_fafd_qcd.yaml`  
-  - 完整 Spectral-DETR 配置，**同时启用 LUE + FAFD + QCD**，并给出推荐超参数（如 `fafd_alpha=0.15`, `qcd_temperature=0.15`, `lue_warmup_epochs=15` 等）。
-
-你只需根据实际数据路径修改配置中的 `dataset` 部分，例如：
-
-```yaml
-dataset:
-  dataset_file: "coco"
-  coco_path: "/path/to/mine-datasets"
-```
-
-### 4.3 启动训练
-
-使用专门的矿井场景训练脚本 `train_mine.py`：
+Create a Python environment and install the project in editable mode:
 
 ```bash
-# 纯基线 RF-DETR（用于对比）
-python3 train_mine.py --config configs/baseline.yaml
+git clone https://github.com/songyuexin666-wq/Spectral-DETR.git
+cd Spectral-DETR
 
-# 完整 Spectral-DETR（FAFD + QCD + LUE 全开）
-python3 train_mine.py --config configs/lue_fafd_qcd.yaml
+conda create -n spectral-detr python=3.10 -y
+conda activate spectral-detr
+
+pip install -e .
 ```
 
-脚本会自动完成：
+Install PyTorch according to your CUDA version from the official PyTorch instructions. The experiments reported in the revised manuscript used a single RTX 3090 with 24 GB memory.
 
-- 检查数据集目录与标注格式（COCO / Roboflow）；
-- 从标注文件中解析类别数；
-- 根据 `pretrain_weights` 智能选择 RF-DETR Base / Medium / Large；
-- 打印模型参数量与 FLOPs；
-- 将完整配置保存到输出目录，并记录诊断信息（退化桶、样例可视化等）。
+## Data
 
----
+The manuscript uses three dataset-specific evaluation settings.
 
-## 5. 在其他数据集上训练（ScienceDB / ExDark）
+| Dataset | Role in manuscript | Public source |
+|---|---|---|
+| Mine-Objects | Self-built mine-domain benchmark with a fixed sequence-level 8:1:1 train/validation/test split | https://github.com/songyuexin666-wq/mine-datasets |
+| ScienceDB V1 Coal Mine Underground Drilling Site Object Detection Dataset | Additional mine-domain benchmark converted to COCO format with a deterministic 80:20 train/validation partition | https://doi.org/10.57760/sciencedb.j00001.01020 |
+| ExDark | Public low-light benchmark for external degraded-scene evaluation | https://github.com/cs-chan/Exclusively-Dark-Image-Dataset |
 
-只需在配置文件中调整 `dataset` 部分指向目标数据集，并保证标注转换为 COCO 格式：
-
-```yaml
-dataset:
-  dataset_file: "coco"
-  coco_path: "/path/to/sciencedb_or_exdark_coco_style"
-```
-
-然后复用同一训练脚本：
-
-```bash
-python3 train_mine.py --config configs/lue_fafd_qcd.yaml
-```
-
-> 注：ExDark 原始提供为分类/检测格式，需先转换为 COCO 标注；本仓库中可添加相应的转换脚本。
-
----
-
-## 6. 推理示例（单张图像）
-
-以下示例展示如何在 Python 中加载 Spectral-DETR 模型并对单张图像进行推理（接口与原 RF-DETR 保持一致）：
-
-```python
-import torch
-from PIL import Image
-from rfdetr import RFDETRBase
-from rfdetr.util.coco_classes import COCO_CLASSES
-
-# 根据需要选择 RFDETRBase / RFDETRMedium / RFDETRLarge，并加载 Spectral-DETR 训练好的权重
-model = RFDETRBase()
-model.load_state_dict(torch.load("/path/to/spectral_detr_mineobjects.pth", map_location="cpu"))
-model.eval()
-
-image = Image.open("/path/to/your_image.jpg").convert("RGB")
-detections = model.predict(image, threshold=0.5)
-
-for cls_id, conf, box in zip(detections.class_id, detections.confidence, detections.bbox):
-    print(COCO_CLASSES[cls_id], conf, box)
-```
-
----
-
-## 7. 与原 RF-DETR 的关系
-
-- 本仓库基于 [RF-DETR](https://github.com/roboflow/rf-detr) 源码进行扩展和适配，主要增加了：
-  - 矿井退化场景的数据处理与诊断工具；
-  - FAFD / QCD / LUE 三个模块及其超参搜索结果；
-  - 专用于 Mine-Objects / ScienceDB / ExDark 的训练脚本与配置。
-
-- 原 RF-DETR 的特性（如实时性能、Segmentation Head、优化推理等）仍可参考其官方仓库与文档。
-
----
-
-## 8. 致谢与引用
-
-### 致谢
-
-本仓库由 **Song Yuexin** 及合作者 **Dai Lukang**（`dailukang1800@163.com`）、**Xu Xinqi**（`xuxinqi269@gmail.com`）共同维护与开发。  
-
-本工作构建在以下优秀开源项目之上：
-
-- [RF-DETR](https://github.com/roboflow/rf-detr)
-- LW-DETR
-- DINOv2
-- Deformable DETR
-
-感谢这些工作的作者开放源码。
-
-### 引用（示例）
-
-如果本仓库或 Mine-Objects 数据集对你的研究有帮助，欢迎在论文中引用或致谢：
+Expected COCO-style layout:
 
 ```text
-Spectral-DETR and Mine-Objects Dataset,
-https://github.com/songyuexin666-wq/Sprectral-DETR
-https://github.com/songyuexin666-wq/mine-datasets
+dataset_root/
+├── train/
+├── val/ or valid/
+├── test/                 # required for held-out Mine-Objects test evaluation
+└── annotations/
+    ├── instances_train.json
+    ├── instances_val.json
+    └── instances_test.json
 ```
 
----
+Roboflow-style `_annotations.coco.json` layouts are also supported by `train_mine.py`.
 
-## 9. License
+## Main Configuration
 
-本仓库代码在 **MIT License** 下发布，具体条款见本仓库中的 `LICENSE` 文件。  
-在使用本代码与数据集时，请遵循相应许可证要求。
+The final Spectral-DETR configuration is:
 
+```text
+configs/lue_fafd_qcd.yaml
+```
+
+Despite the historical filename, the configuration corresponds to the revised terminology:
+
+- `use_dafd`: enables Degradation-Aware Frequency Decomposition.
+- `use_dqcd`: enables Degradation-adaptive Query Contrastive Denoising.
+- `use_lue`: enables Learned Uncertainty Estimation.
+- `use_scu`: enables Salience-Calibrated Uncertainty.
+
+Key manuscript settings include:
+
+- DINOv2-Small backbone.
+- Input resolution: `560 × 560`.
+- Three DAFD frequency bands.
+- DAFD residual coefficient: `alpha = 0.15`.
+- DQCD base temperature: `tau_base = 0.15`.
+- DQCD memory/negative count: `K = 128`.
+- DQCD starts after epoch 8 with a five-epoch warmup.
+- LUE warmup: 15 epochs.
+- SCU calibration coefficients: `c1 = -1.5`, `c0 = -4.2`.
+
+## Training
+
+Train a baseline or Spectral-DETR model with a YAML configuration:
+
+```bash
+python train_mine.py \
+  --config configs/lue_fafd_qcd.yaml \
+  --device cuda \
+  --seed 42
+```
+
+For controlled ablations, use the corresponding files in `configs/`, for example:
+
+```bash
+python train_mine.py --config configs/baseline.yaml --device cuda
+python train_mine.py --config configs/ablation_softnms_dafd.yaml --device cuda
+python train_mine.py --config configs/ablation_softnms_dafd_dqcd.yaml --device cuda
+python train_mine.py --config configs/ablation_softnms_dafd_dqcd_lue_scu.yaml --device cuda
+```
+
+The training script saves the effective configuration into the output directory for reproducibility.
+
+## Evaluation
+
+Evaluate a trained checkpoint on a held-out test split:
+
+```bash
+python eval_test.py \
+  --checkpoint outputs/full/checkpoint_best_total.pth \
+  --dataset_file coco \
+  --coco_path /path/to/dataset_root \
+  --device cuda \
+  --output_dir outputs/full_eval
+```
+
+Measure pure model-forward FPS:
+
+```bash
+python benchmark_fps.py \
+  --checkpoint outputs/full/checkpoint_best_total.pth \
+  --device cuda \
+  --warmup 20 \
+  --iters 100
+```
+
+Evaluate a dedicated five-class ScienceDB checkpoint:
+
+```bash
+python tools/eval_sciencedb.py \
+  --checkpoint outputs/sciencedb/checkpoint_best_total.pth \
+  --coco-path /path/to/sciencedb_coco \
+  --split val \
+  --device cuda \
+  --output outputs/sciencedb/sciencedb_results.json
+```
+
+## Reproducing Manuscript Tables and Figures
+
+The revised manuscript reports dataset-specific results and controlled RF-DETR ablations. Table-generation and diagnostic helpers are provided in `tools/` and `scripts/`, including:
+
+- `tools/make_tables.py` for manuscript table assembly.
+- `tools/export_figure5.py` for matched qualitative examples.
+- `tools/eval_sciencedb.py` for ScienceDB evaluation.
+- `benchmark_fps.py` for the FPS protocol.
+
+Some plotting scripts in `scripts/` are retained for historical analysis and may require paths to local experiment logs. The manuscript tables should be reproduced from the final trained checkpoints and generated result JSON files, not from hard-coded legacy plots.
+
+## Reproducibility Notes
+
+- DQCD and SCU are training-only objectives and do not add inference operations.
+- LUE can be retained for diagnostic uncertainty output; final detections use the standard class scores and box predictions.
+- DAFD is the main source of inference overhead because it uses FFT/IFFT operations and additional spatial fusion.
+- ScienceDB is used as a dataset-specific mine-domain benchmark after COCO conversion; the repository DOI is not a source-code repository.
+- Pretrained weights and trained checkpoints are not bundled in this repository unless explicitly released separately.
+
+## Citation
+
+If you use this code, please cite the associated manuscript after publication. Before formal publication, cite the repository as:
+
+```bibtex
+@misc{spectral_detr_code,
+  title        = {Spectral-DETR: Detector-Internal Reliability Propagation for Degraded Underground Object Detection},
+  author       = {Yuexin Song},
+  year         = {2026},
+  howpublished = {\url{https://github.com/songyuexin666-wq/Spectral-DETR}}
+}
+```
+
+## Acknowledgements
+
+This implementation builds on RF-DETR, DINOv2, LW-DETR, and Deformable DETR. We thank the authors and maintainers of these projects for their open-source contributions.
+
+## License
+
+This repository follows the license terms inherited from the RF-DETR codebase and included license file. Dataset licenses follow their respective public records.

@@ -1,0 +1,6 @@
+# 由 make_dataset_yaml.py 从 COCO 生成，用于 YOLO 对比实验
+path: datasets_yolo
+train: images/train
+val: images/val
+nc: 12
+names: ['Bicycle', 'Boat', 'Bottle', 'Bus', 'Car', 'Cat', 'Chair', 'Cup', 'Dog', 'Motorbike', 'People', 'Table']

@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """
@@ -27,7 +27,7 @@ class CocoEvaluator(object):
     def __init__(self, coco_gt, iou_types):
         assert isinstance(iou_types, (list, tuple))
         coco_gt = copy.deepcopy(coco_gt)
-        
+
         # 确保COCO数据集有必需的字段（兼容Roboflow等格式）
         if hasattr(coco_gt, 'dataset'):
             if 'info' not in coco_gt.dataset:
@@ -38,8 +38,14 @@ class CocoEvaluator(object):
                 }
             if 'licenses' not in coco_gt.dataset:
                 coco_gt.dataset['licenses'] = []
-        
+
         self.coco_gt = coco_gt
+        category_ids = sorted(coco_gt.getCatIds())
+        self.label_to_category_id = getattr(
+            coco_gt,
+            "label_to_category_id",
+            {label: category_id for label, category_id in enumerate(category_ids)},
+        )
 
         self.iou_types = iou_types
         self.coco_eval = {}
@@ -98,10 +104,11 @@ class CocoEvaluator(object):
             if len(prediction) == 0:
                 continue
 
-            boxes = prediction["boxes"]
+            valid = self._valid_label_mask(prediction["labels"])
+            boxes = prediction["boxes"][valid]
             boxes = convert_to_xywh(boxes).tolist()
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
+            scores = prediction["scores"][valid].tolist()
+            labels = self._to_category_ids(prediction["labels"][valid])
 
             coco_results.extend(
                 [
@@ -122,14 +129,15 @@ class CocoEvaluator(object):
             if len(prediction) == 0:
                 continue
 
-            scores = prediction["scores"]
-            labels = prediction["labels"]
-            masks = prediction["masks"]
+            valid = self._valid_label_mask(prediction["labels"])
+            scores = prediction["scores"][valid]
+            labels = prediction["labels"][valid]
+            masks = prediction["masks"][valid]
 
             masks = masks > 0.5
 
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
+            scores = scores.tolist()
+            labels = self._to_category_ids(labels)
 
             rles = [
                 mask_util.encode(np.array(mask.cpu()[0, :, :, np.newaxis], dtype=np.uint8, order="F"))[0]
@@ -157,11 +165,12 @@ class CocoEvaluator(object):
             if len(prediction) == 0:
                 continue
 
-            boxes = prediction["boxes"]
+            valid = self._valid_label_mask(prediction["labels"])
+            boxes = prediction["boxes"][valid]
             boxes = convert_to_xywh(boxes).tolist()
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
-            keypoints = prediction["keypoints"]
+            scores = prediction["scores"][valid].tolist()
+            labels = self._to_category_ids(prediction["labels"][valid])
+            keypoints = prediction["keypoints"][valid]
             keypoints = keypoints.flatten(start_dim=1).tolist()
 
             coco_results.extend(
@@ -176,6 +185,17 @@ class CocoEvaluator(object):
                 ]
             )
         return coco_results
+
+    def _valid_label_mask(self, labels):
+        valid_labels = set(self.label_to_category_id)
+        return torch.as_tensor(
+            [int(label) in valid_labels for label in labels.tolist()],
+            dtype=torch.bool,
+            device=labels.device,
+        )
+
+    def _to_category_ids(self, labels):
+        return [self.label_to_category_id[int(label)] for label in labels.tolist()]
 
 
 def convert_to_xywh(boxes):

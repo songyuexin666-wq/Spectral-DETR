@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 import json
@@ -83,7 +83,7 @@ class RFDETR:
         """
         config = self.get_train_config(**kwargs)
         self.train_from_config(config, **kwargs)
-    
+
     def optimize_for_inference(self, compile=True, batch_size=1, dtype=torch.float32):
         self.remove_optimized_model()
 
@@ -101,14 +101,14 @@ class RFDETR:
             self.model.inference_model = torch.jit.trace(
                 self.model.inference_model,
                 torch.randn(
-                    batch_size, 3, self.model.resolution, self.model.resolution, 
+                    batch_size, 3, self.model.resolution, self.model.resolution,
                     device=self.model.device,
                     dtype=dtype
                 )
             )
             self._optimized_has_been_compiled = True
             self._optimized_batch_size = batch_size
-    
+
     def remove_optimized_model(self):
         self.model.inference_model = None
         self._is_optimized_for_inference = False
@@ -116,7 +116,7 @@ class RFDETR:
         self._optimized_batch_size = None
         self._optimized_resolution = None
         self._optimized_half = False
-    
+
     def export(self, **kwargs):
         """
         Export your model to an ONNX file.
@@ -142,7 +142,7 @@ class RFDETR:
                 coco_path = getattr(config, 'coco_path', config.dataset_dir if hasattr(config, 'dataset_dir') else None)
                 if coco_path is None:
                     coco_path = getattr(config, 'dataset_dir', 'datasets')
-                
+
                 ann_file = None
                 # 优先尝试标准COCO格式
                 standard_path = os.path.join(coco_path, "annotations", "instances_train.json")
@@ -151,7 +151,7 @@ class RFDETR:
                 # 尝试简化格式
                 elif os.path.exists(os.path.join(coco_path, "annotations", "instances_val.json")):
                     ann_file = os.path.join(coco_path, "annotations", "instances_val.json")
-                
+
                 if ann_file and os.path.exists(ann_file):
                     with open(ann_file, 'r', encoding='utf-8') as f:
                         anns = json.load(f)
@@ -170,13 +170,13 @@ class RFDETR:
 
         if self.model_config.num_classes != num_classes:
             self.model.reinitialize_detection_head(num_classes)
-        
+
         train_config = config.dict()
         model_config = self.model_config.dict()
         model_config.pop("num_classes")
         if "class_names" in model_config:
             model_config.pop("class_names")
-        
+
         if "class_names" in train_config and train_config["class_names"] is None:
             train_config["class_names"] = class_names
 
@@ -234,7 +234,7 @@ class RFDETR:
         Retrieve a model instance based on the provided configuration.
         """
         return Model(**config.dict())
-    
+
     # Get class_names from the model
     @property
     def class_names(self):
@@ -246,7 +246,7 @@ class RFDETR:
         """
         if hasattr(self.model, 'class_names') and self.model.class_names:
             return {i+1: name for i, name in enumerate(self.model.class_names)}
-            
+
         return COCO_CLASSES
 
     def predict(
@@ -300,7 +300,7 @@ class RFDETR:
 
             if not isinstance(img, torch.Tensor):
                 img = F.to_tensor(img)
-            
+
             if (img > 1).any():
                 raise ValueError(
                     "Image has pixel values above 1. Please ensure the image is "
@@ -312,7 +312,7 @@ class RFDETR:
                     f"{img.shape[0]} channels."
                 )
             img_tensor = img
-            
+
             h, w = img_tensor.shape[1:]
             orig_sizes.append((h, w))
 
@@ -346,12 +346,13 @@ class RFDETR:
             else:
                 predictions = self.model.model(batch_tensor)
             if isinstance(predictions, tuple):
+                tuple_predictions = predictions
                 predictions = {
-                    "pred_logits": predictions[1],
-                    "pred_boxes": predictions[0],
+                    "pred_logits": tuple_predictions[1],
+                    "pred_boxes": tuple_predictions[0],
                 }
-                if len(predictions) == 3:
-                    predictions["pred_masks"] = predictions[2]
+                if len(tuple_predictions) == 3:
+                    predictions["pred_masks"] = tuple_predictions[2]
             target_sizes = torch.tensor(orig_sizes, device=self.model.device)
             results = self.model.postprocess(predictions, target_sizes=target_sizes)
 
@@ -386,7 +387,7 @@ class RFDETR:
             detections_list.append(detections)
 
         return detections_list if len(detections_list) > 1 else detections_list[0]
-    
+
     def deploy_to_roboflow(self, workspace: str, project_id: str, version: str, api_key: str = None, size: str = None):
         """
         Deploy the trained RF-DETR model to Roboflow.

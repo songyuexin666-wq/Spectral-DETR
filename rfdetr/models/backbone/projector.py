@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """
@@ -78,11 +78,11 @@ def get_activation(name, inplace=False):
 # ============================================================================
 # 🚀 DAFD: Degradation-Aware Frequency Decomposition (v5.0)
 # ============================================================================
-# 相比 FAFD (v4.0) 的核心改进:
+# 相比 DAFD (v4.0) 的核心改进:
 #   1. 单频段门控 → 多频带分解 (低频/中频/高频，可学习边界)
 #   2. 各频带独立门控 + 跨频带交互 (轻量 1x1 conv 融合)
 #   3. 场景自适应 FiLM 提升为 per-band 独立调制
-#   4. 暴露 per-band 门控统计，供下游 DQCD 使用
+#   4. 暴露 per-band 门控统计，供下游 DDQCD 使用
 #
 # 与 DVT (ECCV 2024) 的区别:
 #   DVT: 空域跨视图一致性 → 神经场分解 (两阶段训练，与检测任务无关)
@@ -120,7 +120,7 @@ class DAFDBlock(nn.Module):
         self.n_bands = n_bands
         self.target_keep = float(target_keep)
         self.entropy_weight = float(entropy_weight)
-        self._last_gates = None  # 存储 per-band gate 供 DQCD 使用
+        self._last_gates = None  # 存储 per-band gate 供 DDQCD 使用
 
         # 可学习频带中心 + 宽度 (经过 sigmoid 约束到 [0,1])
         # 初始: 低频=0.1, 中频=0.35, 高频=0.6
@@ -138,7 +138,9 @@ class DAFDBlock(nn.Module):
         self.band_centers = nn.Parameter(torch.logit(center_unit))
         self.band_widths = nn.Parameter(torch.logit(width_unit))
 
-        # Per-band 频域门控 (独立参数，每个频带学自己的滤波策略)
+        # Per-band frequency gates start at target_keep. A non-saturated
+        # initialization leaves room for the detection objective to specialize
+        # the bands while preserving most spectral energy initially.
         self.gate_bodies = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(channels, channels // reduction, 1),
@@ -146,21 +148,13 @@ class DAFDBlock(nn.Module):
                 nn.Conv2d(channels // reduction, channels, 1),
             ) for _ in range(n_bands)
         ])
-        for gate in self.gate_bodies:
-            nn.init.constant_(gate[2].bias, 4.0)  # 初始近恒等
-            nn.init.zeros_(gate[2].weight)
-
-        # Per-band 场景自适应 FiLM (降质场景影响各频带的策略不同)
-        # Reinitialize the final gate projections explicitly. The legacy line
-        # above contains a zero-init call after a comment marker, so that call
-        # is not executed. Starting at target_keep also avoids sigmoid
-        # saturation and gives detection gradients room to specialize bands.
         gate_init = min(max(self.target_keep, 1e-4), 1.0 - 1e-4)
         gate_bias = math.log(gate_init / (1.0 - gate_init))
         for gate in self.gate_bodies:
             nn.init.constant_(gate[2].bias, gate_bias)
             nn.init.zeros_(gate[2].weight)
 
+        # Per-band scene-adaptive FiLM.
         self.scene_encoders = nn.ModuleList([
             nn.Sequential(
                 nn.AdaptiveAvgPool2d(1),
@@ -280,7 +274,7 @@ class DAFDBlock(nn.Module):
         target_dtype = self.cross_band_fusion.weight.dtype
         x_out = self.cross_band_fusion(band_concat.to(target_dtype))    # (B, C, H, W)
 
-        # 存储 per-band gate 统计供 DQCD 使用
+        # 存储 per-band gate 统计供 DDQCD 使用
         gate_means = torch.stack([g.mean(dim=[0, 2, 3]) for g in band_gates], dim=0)  # (n_bands, C)
         gate_stds = torch.stack([g.std(dim=[0, 2, 3]) for g in band_gates], dim=0)    # (n_bands, C)
         self._last_gates = {
@@ -322,7 +316,7 @@ class DAFDBlock(nn.Module):
                 entropy = -(g * torch.log(g) + (1.0 - g) * torch.log(1.0 - g)).mean()
                 loss = loss + self.entropy_weight * entropy
         return loss / n if n > 0 else None
-    
+
 
 
 class ConvX(nn.Module):
@@ -407,6 +401,8 @@ class MultiScaleProjector(nn.Module):
         dafd_n_bands: int = 3,
         dafd_target_keep: float = 0.8,
         dafd_entropy_weight: float = 0.0,
+        dafd_feature_indices=None,
+        dafd_gate_source_index=None,
     ):
         """
         Args:
@@ -428,6 +424,30 @@ class MultiScaleProjector(nn.Module):
         self.dafd_n_bands = int(dafd_n_bands)
         self.dafd_target_keep = float(dafd_target_keep)
         self.dafd_entropy_weight = float(dafd_entropy_weight)
+        if dafd_feature_indices is None:
+            dafd_feature_indices = list(range(len(in_channels)))
+        self.dafd_feature_indices = tuple(sorted(set(dafd_feature_indices)))
+        invalid_indices = [
+            index for index in self.dafd_feature_indices
+            if index < 0 or index >= len(in_channels)
+        ]
+        if invalid_indices:
+            raise ValueError(
+                "dafd_feature_indices contains indexes outside the encoder "
+                f"feature range [0, {len(in_channels) - 1}]: {invalid_indices}"
+            )
+        if self.use_dafd and not self.dafd_feature_indices:
+            raise ValueError("DAFD is enabled but dafd_feature_indices is empty")
+        if dafd_gate_source_index is None and self.dafd_feature_indices:
+            dafd_gate_source_index = self.dafd_feature_indices[0]
+        if (
+            dafd_gate_source_index is not None
+            and dafd_gate_source_index not in self.dafd_feature_indices
+        ):
+            raise ValueError(
+                "dafd_gate_source_index must identify an active DAFD encoder tap"
+            )
+        self.dafd_gate_source_index = dafd_gate_source_index
 
         # 🚀 DAFD: 为每个输入特征层级添加DAFD模块
         if self.use_dafd:
@@ -523,12 +543,17 @@ class MultiScaleProjector(nn.Module):
                 convention: "p<stage>", where stage has stride = 2 ** stage e.g.,
                 ["p2", "p3", ..., "p6"].
         """
-        # 🚀 DAFD: 在处理前对每个特征层级应用多频带分解
+        # Apply DAFD only to the configured encoder taps. Keeping the default as
+        # all taps preserves the behavior of existing checkpoints.
         # 🚀 v6.0: 传入全局退化嵌入，使 DAFD 的 FiLM 获得图像级退化上下文
         if self.use_dafd:
             deg = self._deg_global
-            x = [self.dafd_layers[j](feat, deg_global=deg) for j, feat in enumerate(x)]
-        
+            active = set(self.dafd_feature_indices)
+            x = [
+                self.dafd_layers[j](feat, deg_global=deg) if j in active else feat
+                for j, feat in enumerate(x)
+            ]
+
         num_features = len(x)
         if self.survival_prob < 1.0 and self.training:
             final_drop_prob = 1 - self.survival_prob
@@ -541,7 +566,7 @@ class MultiScaleProjector(nn.Module):
             for i in range(self.force_drop_last_n_features):
                 # don't do it inplace to ensure the compiler can optimize out the backbone layers
                 x[-(i+1)] = torch.zeros_like(x[-(i+1)])
-                
+
         results = []
         # x list of len(out_features_indexes)
         for i, stage in enumerate(self.stages):
@@ -562,7 +587,11 @@ class MultiScaleProjector(nn.Module):
     def get_dafd_gate_stats(self):
         if not self.use_dafd:
             return None
-        stats = [layer.get_gate_stats() for layer in self.dafd_layers if layer.get_gate_stats() is not None]
+        stats = [
+            self.dafd_layers[index].get_gate_stats()
+            for index in self.dafd_feature_indices
+            if self.dafd_layers[index].get_gate_stats() is not None
+        ]
         if not stats:
             return None
         return stats  # 返回 per-layer, per-band 统计
@@ -570,7 +599,11 @@ class MultiScaleProjector(nn.Module):
     def get_dafd_sparsity_loss(self):
         if not self.use_dafd:
             return None
-        losses = [layer.get_sparsity_loss() for layer in self.dafd_layers if layer.get_sparsity_loss() is not None]
+        losses = [
+            self.dafd_layers[index].get_sparsity_loss()
+            for index in self.dafd_feature_indices
+            if self.dafd_layers[index].get_sparsity_loss() is not None
+        ]
         if not losses:
             return None
         return torch.stack(losses).mean()
@@ -578,10 +611,12 @@ class MultiScaleProjector(nn.Module):
     def get_dafd_gate_visual(self):
         if not self.use_dafd:
             return None
-        for layer in self.dafd_layers:
-            gates = getattr(layer, "_last_gates", None)
-            if gates is not None and 'band_gates' in gates:
-                return gates['band_gates']
+        if self.dafd_gate_source_index is None:
+            return None
+        layer = self.dafd_layers[self.dafd_gate_source_index]
+        gates = getattr(layer, "_last_gates", None)
+        if gates is not None and 'band_gates' in gates:
+            return gates['band_gates']
         return None
 
 

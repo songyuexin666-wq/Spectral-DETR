@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """Dataset file for Object365."""
@@ -21,12 +21,12 @@ def build_o365_raw(image_set, args, resolution):
         "val": (root, root / 'zhiyuan_objv2_minival5k.json'),
     }
     img_folder, ann_file = PATHS[image_set]
-    
+
     try:
         square_resize = args.square_resize
     except:
         square_resize = False
-    
+
     try:
         square_resize_div_64 = args.square_resize_div_64
     except:

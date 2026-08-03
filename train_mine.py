@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ------------------------------------------------------------------------
 # Spectral-DETR 矿井场景优化训练脚本
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # 支持 YAML 配置文件驱动的训练流程
 # ------------------------------------------------------------------------
 
@@ -21,10 +21,10 @@ def load_config(config_path: str) -> dict:
     """加载YAML配置文件"""
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
-    
+
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-    
+
     return config
 
 
@@ -33,20 +33,20 @@ def validate_dataset(dataset_dir: str):
     print("=" * 80)
     print("验证数据集...")
     print("=" * 80)
-    
+
     if not os.path.exists(dataset_dir):
         raise FileNotFoundError(f"数据集目录不存在: {dataset_dir}")
-    
+
     # 优先检查标准COCO格式 (annotations/instances_train.json)
     train_path = os.path.join(dataset_dir, "annotations", "instances_train.json")
     valid_path = os.path.join(dataset_dir, "annotations", "instances_val.json")
-    
+
     if os.path.exists(train_path) and os.path.exists(valid_path):
         print(f"✓ 检测到标准COCO格式数据集")
         print(f"  训练集: {train_path}")
         print(f"  验证集: {valid_path}")
         return train_path, valid_path, "coco"
-    
+
     # 检查Roboflow格式 (train/_annotations.coco.json)
     train_path = os.path.join(dataset_dir, "train", "_annotations.coco.json")
     if os.path.exists(train_path):
@@ -56,12 +56,12 @@ def validate_dataset(dataset_dir: str):
             valid_path = os.path.join(dataset_dir, "val", "_annotations.coco.json")
             if not os.path.exists(valid_path):
                 raise FileNotFoundError(f"验证集标注文件不存在")
-        
+
         print(f"✓ 检测到Roboflow格式数据集")
         print(f"  训练集: {train_path}")
         print(f"  验证集: {valid_path}")
         return train_path, valid_path, "roboflow"
-    
+
     raise FileNotFoundError(
         f"未找到有效的数据集格式。请确保数据集是以下格式之一：\n"
         f"  1. 标准COCO格式: {os.path.join(dataset_dir, 'annotations', 'instances_train.json')}\n"
@@ -73,27 +73,27 @@ def get_num_classes(annotation_path: str) -> int:
     """从标注文件获取类别数"""
     with open(annotation_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     categories = data.get('categories', [])
     num_classes = len(categories)
-    
+
     if num_classes == 0:
         raise ValueError("类别数量为0！请检查标注文件")
-    
+
     # 检查 category_id 是否有效（允许从0开始）
     annotations = data.get('annotations', [])
     if len(annotations) > 0:
         category_ids = {ann.get('category_id') for ann in annotations}
-        
+
         category_ids_in_cats = {cat['id'] for cat in categories}
         invalid_ids = category_ids - category_ids_in_cats
         if invalid_ids:
             raise ValueError(f"发现无效的 category_id: {invalid_ids}")
-    
+
     print(f"✓ 检测到 {num_classes} 个类别")
     for cat in categories:
         print(f"  - {cat['id']}: {cat['name']}")
-    
+
     return num_classes
 
 
@@ -171,16 +171,16 @@ def print_model_complexity(model, resolution: int = 576, device: str = 'cpu'):
 def save_config_to_output(config: dict, output_dir: str):
     """保存配置到输出目录"""
     os.makedirs(output_dir, exist_ok=True)
-    
+
     config_save_path = os.path.join(output_dir, "config.yaml")
     with open(config_save_path, 'w', encoding='utf-8') as f:
         yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
-    
+
     print(f"✓ 配置已保存到: {config_save_path}")
 
 
 def print_experiment_info(config: dict):
-    """打印实验信息（仅包含 configs/ 下的 LUE/FAFD/QCD 消融开关）"""
+    """打印实验信息（仅包含 configs/ 下的 LUE/DAFD/DQCD 消融开关）"""
     model_cfg = config.get("model", {})
     name = config.get("experiment_name") or config.get("name") or "experiment"
 
@@ -190,7 +190,7 @@ def print_experiment_info(config: dict):
     if model_cfg.get("use_dafd", False):
         active.append("DAFD")
     if model_cfg.get("use_dqcd", False):
-        active.append("DQCD")
+        active.append("DDQCD")
     if model_cfg.get("use_scu", False):
         active.append("SCU")
 
@@ -228,27 +228,27 @@ def main():
         default=None,
         help="随机种子（覆盖配置文件）"
     )
-    
+
     args = parser.parse_args()
-    
+
     # ===== 1. 加载配置 =====
     print("=" * 80)
     print("加载配置文件...")
     print("=" * 80)
     config = load_config(args.config)
     print(f"✓ 配置文件加载成功: {args.config}")
-    
+
     # ===== 2. 设备检测 =====
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n使用设备: {device}")
     if device == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-    
+
     # ===== 3. 验证数据集 =====
     dataset_config = config.get('dataset', {})
     dataset_dir = dataset_config.get('dataset_dir') or dataset_config.get('coco_path') or 'datasets'
     train_path, valid_path, dataset_format = validate_dataset(dataset_dir)
-    
+
     # 根据检测到的格式设置 dataset_file
     if dataset_format == "coco":
         dataset_file = "coco"
@@ -257,16 +257,16 @@ def main():
     else:
         dataset_file = dataset_config.get('dataset_file', 'roboflow')
         coco_path = None
-    
+
     # ===== 4. 获取类别数 =====
     print("\n" + "=" * 80)
     print("分析数据集...")
     print("=" * 80)
     num_classes = get_num_classes(train_path)
-    
+
     # ===== 5. 打印实验信息 =====
     print_experiment_info(config)
-    
+
     # ===== 6. 准备输出目录 =====
     output_config = config.get('output', {})
     training_config = config.get('training', {})
@@ -277,28 +277,30 @@ def main():
         or output_config.get('output_dir')
         or 'outputs/experiment'
     )
-    
-    # 添加时间戳
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"{output_dir}_{timestamp}"
-    
+
+    # 添加时间戳。消融实验需要目录名与 manifest 一一对应以便溯源，
+    # 此时用 training.timestamp_output_dir: false 关闭。
+    if training_config.get('timestamp_output_dir', True):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = f"{output_dir}_{timestamp}"
+
     print(f"输出目录: {output_dir}")
-    
+
     # 保存配置
     save_config_to_output(config, output_dir)
-    
+
     # ===== 7. 初始化模型 =====
     print("\n" + "=" * 80)
     print("初始化模型...")
     print("=" * 80)
-    
+
     model_config = config.get('model', {})
-    
+
     # 根据预训练权重自动选择模型类型
     pretrain_weights = model_config.get('pretrain_weights', 'rf-detr-base.pth')
     resolution = model_config.get('resolution', 560)
     patch_size = model_config.get('patch_size', None)  # 从配置读取，如果没有则自动推断
-    
+
     # 自动推断模型类型
     if 'medium' in pretrain_weights.lower():
         model_class = RFDETRMedium
@@ -315,7 +317,7 @@ def main():
         if patch_size is None:
             patch_size = 14  # Base模型默认patch_size=14
         print(f"✓ 使用 RF-DETR Base 模型 (patch_size={patch_size}, resolution={resolution})")
-    
+
     # 创建模型（传入configs中的创新点开关）
     model = model_class(
         num_classes=num_classes,
@@ -336,6 +338,8 @@ def main():
         dafd_sparsity_weight=model_config.get('dafd_sparsity_weight', 0.0),
         dafd_alpha=model_config.get('dafd_alpha', 0.15),
         dafd_n_bands=model_config.get('dafd_n_bands', 3),
+        dafd_feature_indices=model_config.get('dafd_feature_indices'),
+        dafd_gate_source_index=model_config.get('dafd_gate_source_index'),
         use_degradation_estimator=model_config.get('use_degradation_estimator', False),
         dags_start_epoch=model_config.get('dags_start_epoch', model_config.get('dqcd_start_epoch', 8)),
         dags_warmup_epochs=model_config.get('dags_warmup_epochs', 5),
@@ -343,11 +347,12 @@ def main():
         use_soft_nms=model_config.get('use_soft_nms', False),
         soft_nms_sigma=model_config.get('soft_nms_sigma', 0.5),
         soft_nms_iou_threshold=model_config.get('soft_nms_iou_threshold', 0.5),
-        # DQCD
+        # DDQCD
         use_dqcd=model_config.get('use_dqcd', False),
         dqcd_temperature=model_config.get('dqcd_temperature', 0.15),
         dqcd_weight=model_config.get('dqcd_weight', 0.3),
         dqcd_hard_negatives_k=model_config.get('dqcd_hard_negatives_k', 128),
+        dqcd_gate_mode=model_config.get('dqcd_gate_mode', 'adaptive'),
         dqcd_start_epoch=model_config.get('dqcd_start_epoch', 8),
         dqcd_warmup_epochs=model_config.get('dqcd_warmup_epochs', 0),
         dqcd_decay_start_epoch=model_config.get('dqcd_decay_start_epoch', -1),
@@ -372,7 +377,7 @@ def main():
     print("\n" + "=" * 80)
     print("开始训练...")
     print("=" * 80)
-    
+
     try:
         model.train(
             # 数据集配置
@@ -385,7 +390,7 @@ def main():
             resolution=resolution,
             patch_size=patch_size,
             num_windows=model_config.get('num_windows', actual_num_windows),
-            
+
             # 训练配置
             epochs=training_config.get('epochs', 50),
             batch_size=training_config.get('batch_size', 16),
@@ -397,23 +402,23 @@ def main():
             warmup_epochs=training_config.get('warmup_epochs', 0.0),
             clip_max_norm=training_config.get('clip_max_norm', 0.1),
             seed=args.seed if args.seed is not None else training_config.get('seed', 42),
-            
+
             # 数据增强
             multi_scale=training_config.get('multi_scale', True),
             expanded_scales=training_config.get('expanded_scales', True),
-            
+
             # EMA
             use_ema=training_config.get('use_ema', True),
             ema_decay=training_config.get(
                 'ema_decay_effective', training_config.get('ema_decay', 0.993)
             ),
             ema_tau=training_config.get('ema_tau', 100),
-            
+
             # 早停
             early_stopping=training_config.get('early_stopping', False),
             early_stopping_patience=training_config.get('early_stopping_patience', 10),
             early_stopping_min_delta=training_config.get('early_stopping_min_delta', 0.001),
-            
+
             # 输出配置
             output_dir=output_dir,
             checkpoint_interval=training_config.get('checkpoint_interval', output_config.get('checkpoint_interval', 10)),
@@ -437,21 +442,21 @@ def main():
                 "contrast": [0.08, 0.16],
                 "blur": [0.001, 0.004],
             }),
-            
+
             # 设备
             device=device,
-            
+
             # 恢复训练
             resume=args.resume,
         )
-        
+
         print("\n" + "=" * 80)
         print("✓ 训练完成！")
         print("=" * 80)
         print(f"输出目录: {output_dir}")
         print(f"输出目录: {output_dir}")
-        print(f"激活的创新点: {[k for k in ['LUE','DAFD','DQCD','SCU'] if model_config.get('use_' + k.lower(), False)] or ['无（基线）']}")
-        
+        print(f"激活的创新点: {[k for k in ['LUE','DAFD','DDQCD','SCU'] if model_config.get('use_' + k.lower(), False)] or ['无（基线）']}")
+
     except KeyboardInterrupt:
         print("\n\n训练被用户中断")
         sys.exit(0)

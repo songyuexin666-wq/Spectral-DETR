@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """
@@ -22,6 +22,41 @@ from rfdetr.models.backbone import build_backbone
 from rfdetr.models.matcher import build_matcher
 from rfdetr.models.transformer import build_transformer
 from rfdetr.models.segmentation_head import SegmentationHead, get_uncertain_point_coords_with_randomness, point_sample
+
+
+_DDQCD_GATE_MODES = {'adaptive', 'fixed', 'shuffled', 'random'}
+
+
+def compute_dqcd_temperatures(
+    base_temperature, band_gates, mode, batch_size, device, dtype
+):
+    """Return per-image temperatures for a declared coupling control.
+
+    ``adaptive`` uses each image's detached DAFD gate mean. ``fixed`` removes
+    the cross-stage signal. ``shuffled`` preserves the empirical gate
+    distribution but breaks image correspondence, and ``random`` replaces the
+    gate statistic with a uniform control in [0, 1).
+    """
+    if mode not in _DDQCD_GATE_MODES:
+        raise ValueError(
+            f"mode must be one of {sorted(_DDQCD_GATE_MODES)}, got {mode!r}"
+        )
+    temperatures = torch.full(
+        (batch_size,), base_temperature, device=device, dtype=dtype
+    )
+    if not band_gates or mode == 'fixed':
+        return temperatures
+
+    per_band = [
+        gate.detach().float().mean(dim=(1, 2, 3)) for gate in band_gates
+    ]
+    gate_mean = torch.stack(per_band, dim=0).mean(dim=0)
+    if mode == 'shuffled':
+        gate_mean = gate_mean[torch.randperm(batch_size, device=device)]
+    elif mode == 'random':
+        gate_mean = torch.rand_like(gate_mean)
+    return (base_temperature * (0.5 + gate_mean)).to(dtype=dtype)
+
 
 class LWDETR(nn.Module):
     """ This is the Group DETR v3 module that performs object detection """
@@ -59,7 +94,7 @@ class LWDETR(nn.Module):
         self.transformer = transformer
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes)
-        
+
         # 🚀 LUE: bbox 位置回归仍保持 4 维 (cx,cy,w,h)，避免破坏 two-stage / iterative refine 逻辑。
         # 不确定性(log_var) 使用单独 head 输出 4 维。
         self.use_lue = use_lue
@@ -74,7 +109,7 @@ class LWDETR(nn.Module):
         if self.use_lue:
             self.bbox_log_var_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.segmentation_head = segmentation_head
-        
+
         query_dim=4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
         self.query_feat = nn.Embedding(num_queries * group_detr, hidden_dim)
@@ -101,7 +136,7 @@ class LWDETR(nn.Module):
         # init bbox_mebed
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
-        
+
         # 🛠️ Deep Fix: LUE 方差初始化修复 (解决"不确定性陷阱")
         # 将 log_var head 的 bias 初始化为 -5.0，对应初始方差 σ² = exp(-5.0) ≈ 0.0067
         if self.use_lue and self.bbox_log_var_embed is not None:
@@ -140,7 +175,7 @@ class LWDETR(nn.Module):
         self.class_embed.weight.data = self.class_embed.weight.data[:num_classes]
         self.class_embed.bias.data = self.class_embed.bias.data.repeat(num_repeats)
         self.class_embed.bias.data = self.class_embed.bias.data[:num_classes]
-        
+
         if self.two_stage:
             for enc_out_class_embed in self.transformer.enc_out_class_embed:
                 enc_out_class_embed.weight.data = enc_out_class_embed.weight.data.repeat(num_repeats, 1)
@@ -215,7 +250,7 @@ class LWDETR(nn.Module):
             if self.use_lue and self.bbox_log_var_embed is not None:
                 outputs_log_var = self.bbox_log_var_embed(hs)  # [num_layers, B, N, 4]
                 outputs_log_var = torch.clamp(outputs_log_var, min=-7.0, max=7.0)
-            
+
             if self.bbox_reparam:
                 outputs_coord_cxcy = outputs_coord_raw[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
                 outputs_coord_wh = outputs_coord_raw[..., 2:].exp() * ref_unsigmoid[..., 2:]
@@ -248,7 +283,7 @@ class LWDETR(nn.Module):
                 dafd_loss = getattr(self.backbone[0].projector, "get_dafd_sparsity_loss", lambda: None)()
                 if dafd_loss is not None:
                     out["dafd_sparsity_loss"] = dafd_loss
-                # 收集 DAFD per-band gate 统计，供 DQCD 使用
+                # 收集 DAFD per-band gate 统计，供 DDQCD 使用
                 dafd_gates = getattr(self.backbone[0].projector, "get_dafd_gate_visual", lambda: None)()
                 if dafd_gates is not None:
                     out["dafd_band_gates"] = dafd_gates
@@ -356,14 +391,15 @@ class SetCriterion(nn.Module):
     """Spectral-DETR loss criterion — three reliability layers, all independently ablatable.
 
     Layer ① DAFD (Feature):   freq-domain decomposition → sparsity reg (in projector, not here)
-    Layer ② DQCD (Query):     adaptive supervised InfoNCE on decoder queries
+    Layer ② DDQCD (Query):     adaptive supervised InfoNCE on decoder queries
     Layer ③ LUE  (Localization & Classification):
               ├── LUE core:  heteroscedastic Laplace NLL + precision-weighted L1
               ├── SCU:       geometric salience calibration (use_scu toggle)
               └── IA-BCE:    IoU-aware classification loss (ia_bce_loss toggle)
 
     Standard Hungarian matching → per-loss supervision as in Conditional DETR.
-    DegradationEstimator auto-enables when DAFD or DQCD is on (shared foundation).
+    The optional DegradationEstimator is independent and remains disabled unless
+    explicitly requested by configuration.
     """
     def __init__(self,
                 num_classes,
@@ -387,6 +423,7 @@ class SetCriterion(nn.Module):
                 dqcd_temperature: float = 0.15,
                 dqcd_weight: float = 0.3,
                 dqcd_hard_negatives_k: int = 128,
+                dqcd_gate_mode: str = 'adaptive',
                 dqcd_start_epoch: int = 8,
                 dqcd_warmup_epochs: int = 0,
                 dqcd_decay_start_epoch: int = -1,
@@ -396,10 +433,7 @@ class SetCriterion(nn.Module):
                 use_scu: bool = False,
                 scu_salience_weight: float = 0.1,
                 scu_calib_slope: float = -1.5,
-                scu_calib_center: float = -4.2,
-                # 🚀 新增：自适应参数管理
-                use_adaptive_params: bool = True,
-                innovation_strength: float = 1.0):
+                scu_calib_center: float = -4.2):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -408,8 +442,6 @@ class SetCriterion(nn.Module):
             losses: list of all the losses to be applied. See get_loss for list of available losses.
             focal_alpha: alpha in Focal Loss
             group_detr: Number of groups to speed detr training. Default is 1.
-            use_adaptive_params: 是否使用自适应参数管理（强烈推荐）
-            innovation_strength: 创新点整体强度 [0.5-1.5]
         """
         super().__init__()
         self.num_classes = num_classes
@@ -440,6 +472,12 @@ class SetCriterion(nn.Module):
         self.dqcd_temperature = dqcd_temperature
         self.dqcd_weight = dqcd_weight
         self.dqcd_hard_negatives_k = dqcd_hard_negatives_k
+        if dqcd_gate_mode not in _DDQCD_GATE_MODES:
+            raise ValueError(
+                f"dqcd_gate_mode must be one of {sorted(_DDQCD_GATE_MODES)}, "
+                f"got {dqcd_gate_mode!r}"
+            )
+        self.dqcd_gate_mode = dqcd_gate_mode
         self.dqcd_start_epoch = dqcd_start_epoch
         self.dqcd_warmup_epochs = dqcd_warmup_epochs
         self.dqcd_decay_start_epoch = dqcd_decay_start_epoch
@@ -448,26 +486,6 @@ class SetCriterion(nn.Module):
         self.scu_salience_weight = scu_salience_weight
         self.scu_calib_slope = scu_calib_slope
         self.scu_calib_center = scu_calib_center
-
-        # 🚀 自适应参数管理器（三大创新点协同）
-        self.use_adaptive_params = use_adaptive_params
-        if use_adaptive_params:
-            from rfdetr.util.adaptive_params import AdaptiveParamsManager
-            self.param_manager = AdaptiveParamsManager(
-                use_lue=use_lue,
-                use_fafd=use_dafd,  # 内部用 fafd 命名但实际指向 DAFD
-                use_qcd=use_dqcd,
-                innovation_strength=innovation_strength,
-                warmup_epochs=lue_warmup_epochs,
-                qcd_base_weight=dqcd_weight,
-                qcd_initial_temperature=dqcd_temperature,
-                qcd_hard_negatives_k=dqcd_hard_negatives_k,
-            )
-            print("✅ 使用自适应参数管理器（三大创新点协同）")
-        else:
-            # 使用手动配置的参数（向后兼容）
-            self.param_manager = None
-            print("⚠️  使用手动配置参数（不推荐，建议启用自适应参数）")
 
         # diagnostics buffers (main process will read these)
         self._diag_lue_err = None
@@ -502,12 +520,10 @@ class SetCriterion(nn.Module):
         self._diag_dqcd_pos_sim = None
         self._diag_dqcd_neg_sim = None
         return payload
-    
+
     def set_epoch(self, epoch: int):
-        """设置当前epoch，用于warm-up策略和自适应参数"""
+        """Set the current epoch for the explicit loss warm-up schedules."""
         self.current_epoch = epoch
-        if self.use_adaptive_params and self.param_manager is not None:
-            self.param_manager.set_epoch(epoch)
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
@@ -521,7 +537,7 @@ class SetCriterion(nn.Module):
 
         if self.ia_bce_loss:
             alpha = self.focal_alpha
-            gamma = 2 
+            gamma = 2
             src_boxes = outputs['pred_boxes'][idx]
             target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
@@ -621,16 +637,16 @@ class SetCriterion(nn.Module):
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes
-        
+
         v3.1矿井优化: 自适应混合策略 (小目标用NWD, 大目标用IoU)
         v4.0 CVPR创新: LUE不确定性感知的高斯建模
-        
+
         Args:
             outputs: 模型输出，包含 'pred_boxes' 和可选的 'pred_log_vars'
             targets: Ground Truth
             indices: 匹配结果
             num_boxes: 归一化因子
-            
+
         Returns:
             losses: dict包含 'loss_bbox', 'loss_giou', 可选 'loss_uncertainty'
         """
@@ -642,14 +658,10 @@ class SetCriterion(nn.Module):
         losses = {}
 
         # Compute warmup_ratio for LUE (controls when uncertainty loss activates)
-        if self.use_adaptive_params and self.param_manager is not None:
-            lue_params = self.param_manager.get_lue_params()
-            warmup_ratio = lue_params['warmup_ratio'] if lue_params else 0.0
+        if self.lue_warmup_epochs > 0:
+            warmup_ratio = min(1.0, self.current_epoch / self.lue_warmup_epochs)
         else:
-            if self.lue_warmup_epochs > 0:
-                warmup_ratio = min(1.0, self.current_epoch / self.lue_warmup_epochs)
-            else:
-                warmup_ratio = 1.0
+            warmup_ratio = 1.0
 
         # GIoU loss: Generalized IoU with higher weight (giou_loss_coef=5.0)
         # Precision weighting via lue_giou_weighting=True gives stronger gradients
@@ -803,7 +815,7 @@ class SetCriterion(nn.Module):
             losses['loss_giou'] = loss_giou_per_box.sum() / num_boxes
 
         return losses
-    
+
     def loss_dqcd(self, outputs, targets, indices, num_boxes):
         """Adaptive supervised InfoNCE over final decoder query embeddings."""
         device = next(iter(outputs.values())).device
@@ -842,7 +854,7 @@ class SetCriterion(nn.Module):
                 continue
             src_idx = torch.as_tensor(src_idx, device=device, dtype=torch.long)
             tgt_idx = torch.as_tensor(tgt_idx, device=device, dtype=torch.long)
-            # Group DETR repeats every target in each training group. DQCD uses
+            # Group DETR repeats every target in each training group. DDQCD uses
             # the first group only so duplicated GT matches are not treated as
             # independent same-class positives.
             keep = src_idx < queries_per_group
@@ -860,13 +872,15 @@ class SetCriterion(nn.Module):
         if not matched_records:
             return {'loss_dqcd': final_hs.sum() * 0.0}
 
-        temperatures = torch.full(
-            (batch_size,), self.dqcd_temperature, device=device, dtype=final_hs.dtype)
         band_gates = outputs.get('dafd_band_gates')
-        if band_gates:
-            per_band = [gate.detach().float().mean(dim=(1, 2, 3)) for gate in band_gates]
-            gate_mean = torch.stack(per_band, dim=0).mean(dim=0)
-            temperatures = self.dqcd_temperature * (0.5 + gate_mean)
+        temperatures = compute_dqcd_temperatures(
+            self.dqcd_temperature,
+            band_gates,
+            self.dqcd_gate_mode,
+            batch_size,
+            device,
+            final_hs.dtype,
+        )
 
         probabilities = outputs['pred_logits'].detach().float().sigmoid()
         top2 = probabilities.topk(k=min(2, probabilities.shape[-1]), dim=-1).values
@@ -955,7 +969,7 @@ class SetCriterion(nn.Module):
             'diag/dqcd_negatives': torch.tensor(
                 float(sum(item.numel() for item in neg_sims_diag)), device=device),
         }
-    
+
     def loss_masks(self, outputs, targets, indices, num_boxes):
         """Compute BCE-with-logits and Dice losses for segmentation masks on matched pairs.
         Expects outputs to contain 'pred_masks' of shape [B, Q, H, W] and targets with key 'masks'.
@@ -973,7 +987,7 @@ class SetCriterion(nn.Module):
             }
         # gather matched target masks
         target_masks = torch.cat([t['masks'][j] for t, (_, j) in zip(targets, indices)], dim=0)  # [N, Ht, Wt]
-        
+
         # No need to upsample predictions as we are using normalized coordinates :)
         # N x 1 x H x W
         src_masks = src_masks.unsqueeze(1)
@@ -1012,8 +1026,8 @@ class SetCriterion(nn.Module):
         del src_masks
         del target_masks
         return losses
-    
- 
+
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -1032,7 +1046,7 @@ class SetCriterion(nn.Module):
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
             'masks': self.loss_masks,
-            'dqcd': self.loss_dqcd,  # 🚀 DQCD: 退化感知对比去噪
+            'dqcd': self.loss_dqcd,  # 🚀 DDQCD: 退化感知对比去噪
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -1075,7 +1089,7 @@ class SetCriterion(nn.Module):
             ).mean()
             for band_idx, gate_mean in enumerate(gate_means):
                 losses[f'diag/dafd_gate_band_{band_idx}'] = gate_mean
-        # 🚀 DQCD: 退化感知对比去噪
+        # 🚀 DDQCD: 退化感知对比去噪
         if self.use_dqcd:
             losses.update(self.get_loss('dqcd', outputs, targets, indices, num_boxes))
 
@@ -1235,29 +1249,12 @@ class PostProcess(nn.Module):
         use_soft_nms=False,
         soft_nms_sigma=0.5,
         soft_nms_iou_threshold=0.5,
-        use_lue_quality_score=False,
-        lue_quality_gamma=0.25,
-        lue_quality_center=-5.0,
-        lue_quality_max_delta=4.0,
     ) -> None:
         super().__init__()
         self.num_select = num_select
         self.use_soft_nms = use_soft_nms
         self.soft_nms_sigma = soft_nms_sigma
         self.soft_nms_iou_threshold = soft_nms_iou_threshold
-        self.use_lue_quality_score = use_lue_quality_score
-        self.lue_quality_gamma = float(lue_quality_gamma)
-        self.lue_quality_center = float(lue_quality_center)
-        self.lue_quality_max_delta = float(lue_quality_max_delta)
-
-    def _lue_quality_from_log_vars(self, log_vars):
-        """Convert coordinate log-variance to a bounded localization quality."""
-        mean_log_var = log_vars.mean(dim=-1)
-        delta = (mean_log_var - self.lue_quality_center).clamp(
-            min=0.0,
-            max=max(self.lue_quality_max_delta, 0.0),
-        )
-        return torch.exp(-self.lue_quality_gamma * delta).clamp(min=1e-4, max=1.0)
 
     def _apply_soft_nms(self, boxes, scores, labels):
         """Class-wise Gaussian Soft-NMS score decay for duplicate DETR queries."""
@@ -1304,21 +1301,38 @@ class PostProcess(nn.Module):
         """
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
         out_masks = outputs.get('pred_masks', None)
-        out_log_vars = outputs.get('pred_log_vars', None)
+        out_log_vars = outputs.get('pred_log_vars', None)  # 🚀 LUE: 获取不确定性（log σ²）
 
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
 
-        raw_prob = out_logits.sigmoid()
-        prob = raw_prob
-        lue_quality = None
-        if self.use_lue_quality_score and out_log_vars is not None:
-            lue_quality = self._lue_quality_from_log_vars(out_log_vars)
-            prob = raw_prob * lue_quality.unsqueeze(-1)
-        
+        prob = out_logits.sigmoid()
+
+        # 🛠️ Step 2: 修改推理逻辑 - 解决"过度惩罚"问题
+        #
+        # 【专家分析】高不确定性不代表不是物体，只代表位置可能不准
+        # 直接惩罚Score会导致"诚实"的高不确定性预测被错误过滤
+        #
+        # 【方案A - 保守策略】推理时完全忽略不确定性，只看位置均值
+        # 如果这比Baseline好，说明训练策略是对的，只是后处理逻辑错了
+        #
+        # 【方案B - 进阶策略】未来可以在NMS中使用不确定性，或用于Soft-NMS
+        # 当前采用方案A，确保不误杀检测结果
+        #
+        # 注意：如果需要使用不确定性，建议：
+        # 1. 用于Soft-NMS的权重调整（高不确定性框更容易被抑制）
+        # 2. 用于可视化（显示不确定性热图）
+        # 3. 用于后处理（在NMS后根据不确定性微调框的位置，但不要降低Score）
+        #
+        # 暂时注释掉不确定性惩罚，让模型专注于位置回归的准确性
+        # if out_log_vars is not None:
+        #     uncertainty = out_log_vars.mean(dim=-1)
+        #     uncertainty_clamped = torch.clamp(uncertainty, min=-7.0, max=7.0)
+        #     penalty = torch.exp(-0.5 * torch.exp(uncertainty_clamped).clamp(max=1.0))
+        #     prob = prob * penalty.unsqueeze(-1)
+
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), self.num_select, dim=1)
         scores = topk_values
-        raw_scores = torch.gather(raw_prob.view(out_logits.shape[0], -1), 1, topk_indexes)
         topk_boxes = topk_indexes // out_logits.shape[2]
         labels = topk_indexes % out_logits.shape[2]
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -1327,15 +1341,13 @@ class PostProcess(nn.Module):
         # LUE: 为被选中的 top-K queries 计算每个检测框的不确定性（标量）
         # 使用 4 个坐标 log_var 的均值作为每个框的整体不确定性度量
         uncertainties = None
-        selected_quality = None
         if out_log_vars is not None:
             # out_log_vars: [B, Q, 4]，与 out_bbox 对齐
             gathered_logvars = torch.gather(
                 out_log_vars, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, out_log_vars.shape[-1])
-            )
-            uncertainties = gathered_logvars.mean(dim=-1)
-            if lue_quality is not None:
-                selected_quality = torch.gather(lue_quality, 1, topk_boxes)
+            )  # [B, K, 4]
+            # 对 4 个坐标的 log_var 取均值，得到每个框一个标量
+            uncertainties = gathered_logvars.mean(dim=-1)  # [B, K]
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
@@ -1355,9 +1367,6 @@ class PostProcess(nn.Module):
                 res_i = {'scores': scores[i], 'labels': labels[i], 'boxes': boxes[i]}
                 if uncertainties is not None:
                     res_i['uncertainty'] = uncertainties[i]
-                if selected_quality is not None:
-                    res_i['lue_quality'] = selected_quality[i]
-                    res_i['scores_raw'] = raw_scores[i]
                 k_idx = topk_boxes[i]
                 masks_i = torch.gather(
                     out_masks[i],
@@ -1376,18 +1385,15 @@ class PostProcess(nn.Module):
                 res_i['masks'] = masks_i > 0.0
                 results.append(res_i)
         else:
-            for i, (s, l, b, u) in enumerate(zip(
+            for s, l, b, u in zip(
                 scores,
                 labels,
                 boxes,
                 uncertainties if uncertainties is not None else [None] * scores.shape[0],
-            )):
+            ):
                 res = {'scores': s, 'labels': l, 'boxes': b}
                 if u is not None:
                     res['uncertainty'] = u
-                if selected_quality is not None:
-                    res['lue_quality'] = selected_quality[i]
-                    res['scores_raw'] = raw_scores[i]
                 results.append(res)
 
         return results
@@ -1449,8 +1455,10 @@ def build_model(args):
         # 🚀 DAFD: 退化感知频域分解，默认3频带
         dafd_alpha=getattr(args, 'dafd_alpha', 0.15),
         dafd_n_bands=getattr(args, 'dafd_n_bands', 3),
+        dafd_feature_indices=getattr(args, 'dafd_feature_indices', None),
+        dafd_gate_source_index=getattr(args, 'dafd_gate_source_index', None),
         # 🚀 v6.0: 共享退化估计器 — 仅当显式开启时才创建
-        # (不再自动启用; DAFD/DQCD 可以在没有 Estimator 的情况下独立工作)
+        # (不再自动启用; DAFD/DDQCD 可以在没有 Estimator 的情况下独立工作)
         use_degradation_estimator=getattr(args, 'use_degradation_estimator', False),
     )
     if args.encoder_only:
@@ -1463,7 +1471,7 @@ def build_model(args):
 
     segmentation_head = SegmentationHead(args.hidden_dim, args.dec_layers, downsample_ratio=args.mask_downsample_ratio) if args.segmentation_head else None
 
-    # 🚀 CVPR v5.0: DAFD + DQCD + SCU
+    # 🚀 CVPR v5.0: DAFD + DDQCD + SCU
     use_lue = getattr(args, 'use_lue', False)
     use_dqcd = getattr(args, 'use_dqcd', False)
     use_dafd = getattr(args, 'use_dafd', False)
@@ -1510,6 +1518,7 @@ def build_criterion_and_postprocessors(args):
     dqcd_temperature = getattr(args, 'dqcd_temperature', 0.15)
     dqcd_weight = getattr(args, 'dqcd_weight', 0.3)
     dqcd_hard_negatives_k = getattr(args, 'dqcd_hard_negatives_k', 128)
+    dqcd_gate_mode = getattr(args, 'dqcd_gate_mode', 'adaptive')
     dqcd_start_epoch = getattr(args, 'dqcd_start_epoch', 8)
     dqcd_warmup_epochs = getattr(args, 'dqcd_warmup_epochs', 0)
     dqcd_decay_start_epoch = getattr(args, 'dqcd_decay_start_epoch', -1)
@@ -1529,7 +1538,7 @@ def build_criterion_and_postprocessors(args):
     if dafd_sparsity_weight and dafd_sparsity_weight > 0:
         weight_dict['loss_dafd_sparsity'] = dafd_sparsity_weight
 
-    # 🚀 DQCD: weight 已内嵌到 loss 中，weight_dict 中设为 1.0
+    # 🚀 DDQCD: weight 已内嵌到 loss 中，weight_dict 中设为 1.0
     if use_dqcd:
         weight_dict['loss_dqcd'] = 1.0
 
@@ -1573,6 +1582,7 @@ def build_criterion_and_postprocessors(args):
                                 dqcd_temperature=dqcd_temperature,
                                 dqcd_weight=dqcd_weight,
                                 dqcd_hard_negatives_k=dqcd_hard_negatives_k,
+                                dqcd_gate_mode=dqcd_gate_mode,
                                 dqcd_start_epoch=dqcd_start_epoch,
                                 dqcd_warmup_epochs=dqcd_warmup_epochs,
                                 dqcd_decay_start_epoch=dqcd_decay_start_epoch,
@@ -1599,6 +1609,7 @@ def build_criterion_and_postprocessors(args):
                                 dqcd_temperature=dqcd_temperature,
                                 dqcd_weight=dqcd_weight,
                                 dqcd_hard_negatives_k=dqcd_hard_negatives_k,
+                                dqcd_gate_mode=dqcd_gate_mode,
                                 dqcd_start_epoch=dqcd_start_epoch,
                                 dqcd_warmup_epochs=dqcd_warmup_epochs,
                                 dqcd_decay_start_epoch=dqcd_decay_start_epoch,
@@ -1614,10 +1625,6 @@ def build_criterion_and_postprocessors(args):
         use_soft_nms=getattr(args, 'use_soft_nms', False),
         soft_nms_sigma=getattr(args, 'soft_nms_sigma', 0.5),
         soft_nms_iou_threshold=getattr(args, 'soft_nms_iou_threshold', 0.5),
-        use_lue_quality_score=getattr(args, 'use_lue_quality_score', False),
-        lue_quality_gamma=getattr(args, 'lue_quality_gamma', 0.25),
-        lue_quality_center=getattr(args, 'lue_quality_center', -5.0),
-        lue_quality_max_delta=getattr(args, 'lue_quality_max_delta', 4.0),
     )
 
     return criterion, postprocess

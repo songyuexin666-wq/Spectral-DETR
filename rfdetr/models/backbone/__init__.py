@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 import inspect
@@ -75,7 +75,9 @@ def build_backbone(
     dafd_sparsity_weight=0.0,
     dafd_alpha: float = 0.15,
     dafd_n_bands: int = 3,
-    use_degradation_estimator=False,  # 🚀 v6: 共享退化估计器 (DAFD/DQCD/LUE 共用)
+    dafd_feature_indices=None,
+    dafd_gate_source_index=None,
+    use_degradation_estimator=False,  # 🚀 v6: 共享退化估计器 (DAFD/DDQCD/LUE 共用)
     **_unused_kwargs,
 ):
     """
@@ -115,6 +117,8 @@ def build_backbone(
             dafd_sparsity_weight=dafd_sparsity_weight,
             dafd_alpha=dafd_alpha,
             dafd_n_bands=dafd_n_bands,
+            dafd_feature_indices=dafd_feature_indices,
+            dafd_gate_source_index=dafd_gate_source_index,
             use_degradation_estimator=use_degradation_estimator,
         )
 

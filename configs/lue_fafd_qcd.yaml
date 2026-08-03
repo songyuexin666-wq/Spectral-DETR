@@ -10,8 +10,8 @@
 #             ├── SCU:      geometric salience calibration (ablation item)
 #             └── IA-BCE:   IoU-aware classification loss (ablation item)
 #
-# DegradationEstimator (共享退化估计器) 在 DAFD 或 DQCD 开启时自动启用，
-# 为二者提供统一的退化表征 (deg_global + spatial_prior)。
+# DegradationEstimator (共享退化估计器) 由 use_degradation_estimator 独立控制；
+# 当前主配置关闭它，DAFD/DQCD 使用各自已有的退化信号。
 # ==================================================================================
 
 model:
@@ -26,19 +26,19 @@ model:
   # ═══════════════════════════════════════════════════════════════════════
   # ① DAFD — Degradation-Aware Frequency Decomposition
   #    FFT → 3 learnable bands → per-band FiLM + gate → IFFT → cross-band fusion → α-blend
-  #    共享 DegradationEstimator 提供全局退化上下文 (auto-enabled)
+  #    可选 DegradationEstimator 可提供全局退化上下文（当前关闭）
   # ═══════════════════════════════════════════════════════════════════════
   use_dafd: true
   dafd_sparsity_weight: 1e-5
   dafd_alpha: 0.15
   dafd_n_bands: 3
+  dafd_feature_indices: [0, 1, 2, 3]
+  dafd_gate_source_index: 0
   use_degradation_estimator: false
   dags_start_epoch: 8
   dags_warmup_epochs: 5
   dags_bonus_scale: 0.0
-  # Main innovation experiments must keep post-processing identical to baseline.
-  # Soft-NMS can be evaluated separately as an inference-only appendix setting.
-  use_soft_nms: false
+  use_soft_nms: true
   soft_nms_sigma: 0.5
   soft_nms_iou_threshold: 0.6
 
@@ -54,6 +54,7 @@ model:
   dqcd_temperature: 0.15
   dqcd_weight: 0.08
   dqcd_hard_negatives_k: 128
+  dqcd_gate_mode: "adaptive"
   dqcd_decay_start_epoch: -1
   dqcd_decay_epochs: 25
   dqcd_final_weight: -1.0

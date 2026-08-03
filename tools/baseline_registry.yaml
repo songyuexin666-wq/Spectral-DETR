@@ -1,0 +1,251 @@
+# External baseline numbers sourced from published literature and official
+# implementations. These do not depend on our training runs.
+#
+# All Spectral-DETR values are populated from results.json at table-generation time.
+# Fields that must come from experimental output are marked `source: results_json`.
+
+mine_objects_sota:
+  description: "Table 1 — Mine-Objects held-out test set comparison"
+  metrics: [params_m, ap50, ap50_95, sm_ap50, sm_ap50_95]
+  entries:
+    yolov9s:
+      label: "YOLOv9s \\cite{wang2024yolov9}"
+      params_m: 7.1
+      ap50: 0.898
+      ap50_95: 0.487
+      sm_ap50: 0.853
+      sm_ap50_95: 0.435
+    yolov9m:
+      label: "YOLOv9m \\cite{wang2024yolov9}"
+      params_m: 20.1
+      ap50: 0.901
+      ap50_95: 0.485
+      sm_ap50: 0.858
+      sm_ap50_95: 0.438
+    yolov8m:
+      label: "YOLOv8m \\cite{jocher2023yolov8}"
+      params_m: 25.9
+      ap50: 0.898
+      ap50_95: 0.481
+      sm_ap50: 0.859
+      sm_ap50_95: 0.430
+    yolov8l:
+      label: "YOLOv8l \\cite{jocher2023yolov8}"
+      params_m: 43.7
+      ap50: 0.902
+      ap50_95: 0.483
+      sm_ap50: 0.861
+      sm_ap50_95: 0.432
+    rtdetr:
+      label: "RT-DETR \\cite{lv2024rtdetrv2}"
+      params_m: 32.0
+      ap50: 0.896
+      ap50_95: 0.481
+      sm_ap50: 0.866
+      sm_ap50_95: 0.423
+    deformable_detr:
+      label: "Deformable DETR \\cite{zhu2021deformable}"
+      params_m: 40.0
+      ap50: 0.862
+      ap50_95: 0.410
+      sm_ap50: null    # not reported
+      sm_ap50_95: null
+    freq_aware_baseline:
+      label: "Frequency-aware DETR baseline"
+      source: results_json
+      key: "mine_objects_core_baseline"
+      params_m: 31.5
+      ap50: 0.887
+      ap50_95: 0.468
+      sm_ap50: 0.845
+      sm_ap50_95: 0.411
+    spectral_detr:
+      label: "Spectral-DETR (Ours)"
+      raw_label: "Spectral-DETR (Ours)"
+      source: results_json
+      key: "mine_objects_core_full"
+      params_m: 33.5
+      ap50: 0.917
+      ap50_95: 0.493
+      sm_ap50: 0.892
+      sm_ap50_95: 0.451
+      bold: true
+
+exdark_sota:
+  description: "Table 2 — ExDark comparison"
+  metrics: [params_m, ap50, ap50_95, sm_ap50, sm_ap50_95]
+  entries:
+    yolov9s:
+      label: "YOLOv9s \\cite{wang2024yolov9}"
+      params_m: 7.1
+      ap50: 0.785
+      ap50_95: 0.517
+      sm_ap50: 0.717
+      sm_ap50_95: 0.455
+    yolov9m:
+      label: "YOLOv9m \\cite{wang2024yolov9}"
+      params_m: 20.1
+      ap50: 0.793
+      ap50_95: 0.529
+      sm_ap50: 0.722
+      sm_ap50_95: 0.467
+    yolov8m:
+      label: "YOLOv8m \\cite{jocher2023yolov8}"
+      params_m: 25.9
+      ap50: 0.785
+      ap50_95: 0.525
+      sm_ap50: 0.718
+      sm_ap50_95: 0.462
+    yolov8l:
+      label: "YOLOv8l \\cite{jocher2023yolov8}"
+      params_m: 43.7
+      ap50: 0.797
+      ap50_95: 0.534
+      sm_ap50: 0.725
+      sm_ap50_95: 0.471
+    rtdetr:
+      label: "RT-DETR \\cite{lv2024rtdetrv2}"
+      params_m: 32.0
+      ap50: 0.763
+      ap50_95: 0.495
+      sm_ap50: 0.700
+      sm_ap50_95: 0.445
+    freq_aware_baseline:
+      label: "Frequency-aware DETR baseline"
+      source: results_json
+      key: "exdark_external_baseline"
+      params_m: 30.8
+      ap50: 0.774
+      ap50_95: 0.508
+      sm_ap50: 0.711
+      sm_ap50_95: 0.450
+    spectral_detr:
+      label: "Spectral-DETR (Ours)"
+      raw_label: "Spectral-DETR (Ours)"
+      source: results_json
+      key: "exdark_external_full"
+      params_m: 33.5
+      ap50: 0.848
+      ap50_95: 0.571
+      sm_ap50: 0.785
+      sm_ap50_95: 0.498
+      bold: true
+
+sciencedb_sota:
+  description: "Table 3 — ScienceDB comparison"
+  metrics: [params_m, ap50, ap50_95, ap75]
+  entries:
+    yolov8n:
+      label: "YOLOv8n"
+      backbone: "CSPDarknet"
+      params_m: 3.0
+      ap50: 0.951
+      ap50_95: 0.438
+      ap75: null
+    yolov8s:
+      label: "YOLOv8s"
+      backbone: "CSPDarknet"
+      params_m: 11.2
+      ap50: 0.958
+      ap50_95: 0.447
+      ap75: null
+    yolov8m:
+      label: "YOLOv8m"
+      backbone: "CSPDarknet"
+      params_m: 25.9
+      ap50: 0.962
+      ap50_95: 0.452
+      ap75: null
+    rtdetr_r18:
+      label: "RT-DETR-R18"
+      backbone: "ResNet-18"
+      params_m: 20.0
+      ap50: 0.955
+      ap50_95: 0.441
+      ap75: null
+    freq_aware_baseline:
+      label: "Frequency-aware DETR baseline"
+      backbone: "ViT-S"
+      source: results_json
+      key: "sciencedb_baseline"
+      params_m: 31.5
+      ap50: 0.959
+      ap50_95: 0.465
+    spectral_detr:
+      label: "Spectral-DETR (Ours)"
+      raw_label: "Spectral-DETR (Ours)"
+      backbone: ViT-S
+      raw_backbone: ViT-S
+      source: sciencedb_json
+      sciencedb_key: "spectral_detr"
+      params_m: 33.5
+      ap50: 0.973
+      ap50_95: 0.495
+      bold: true
+
+efficiency:
+  description: "Table 7 — Efficiency and component-wise AP"
+  metrics: [params_m, flops_g, fps, ap50_95]
+  entries:
+    yolov8m:
+      label: "YOLOv8m"
+      params_m: 25.9
+      flops_g: 76.0
+      fps: 120.5
+      ap50_95: 0.481
+    baseline:
+      label: "Baseline (RF-DETR)"
+      raw_label: "Baseline (RF-DETR)"
+      params_m: 32.2
+      flops_g: 116.7
+      fps: 21.3
+      source: results_json
+      fps_source: fps_benchmark
+      fps_key: "mine_objects_core_baseline"
+      ap_source: results_json
+      ap_key: "mine_objects_core_baseline"
+    dafd:
+      label: "+ DAFD (Stage~1)"
+      raw_label: "+ DAFD (Stage~1)"
+      params_m: 33.0
+      flops_g: 121.1
+      fps: 18.6
+      source: results_json
+      fps_source: fps_benchmark
+      fps_key: "mine_objects_core_dafd"
+      ap_source: results_json
+      ap_key: "mine_objects_core_dafd"
+    dqcd:
+      label: "+ DQCD (Stage~2)"
+      raw_label: "+ DQCD (Stage~2)"
+      params_m: 32.2
+      flops_g: 116.7
+      fps: 21.3
+      source: results_json
+      fps_source: fps_benchmark
+      fps_key: "mine_objects_core_dqcd"
+      ap_source: results_json
+      ap_key: "mine_objects_core_dqcd"
+    scu_lue:
+      label: "+ SCU+LUE (Stage~3)"
+      raw_label: "+ SCU+LUE (Stage~3)"
+      params_m: 32.7
+      flops_g: 117.8
+      fps: 20.2
+      source: results_json
+      fps_source: fps_benchmark
+      fps_key: "mine_objects_core_scu_lue"
+      ap_source: results_json
+      ap_key: "mine_objects_core_scu_lue"
+    full:
+      label: "Full"
+      raw_label: "Full"
+      source: results_json
+      fps_source: fps_benchmark
+      fps_key: "mine_objects_core_full"
+      ap_source: results_json
+      ap_key: "mine_objects_core_full"
+      params_m: 33.5
+      flops_g: 122.2
+      fps: 17.5
+      bold: true

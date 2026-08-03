@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------
 # Spectral-DETR
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR  (TODO: update link)
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ------------------------------------------------------------------------
 
 """
@@ -77,21 +77,18 @@ class HungarianMatcher(nn.Module):
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
-        
-        # 确保 tgt_ids 在有效范围内（0 到 num_classes-1）
-        # 如果 category_id 是从 1 开始的，需要转换为 0-based
+
+        # Dataset adapters must provide contiguous, zero-based model labels.
+        # Never infer an offset from a batch: a valid batch may simply contain
+        # no examples of class zero.
         num_classes = out_prob.shape[1]
         if tgt_ids.numel() > 0:
             min_id = tgt_ids.min().item()
             max_id = tgt_ids.max().item()
-            
-            # 如果最小值为 1 或更大，说明是 1-based，需要转换为 0-based
-            if min_id >= 1 and max_id <= num_classes:
-                tgt_ids = tgt_ids - 1
-            elif max_id >= num_classes:
-                # 如果超出范围，报错
+            if min_id < 0 or max_id >= num_classes:
                 raise ValueError(
-                    f"category_id 超出范围: 最大值为 {max_id}，但模型只有 {num_classes} 个类别（索引 0-{num_classes-1}）"
+                    "Target labels must be contiguous model indices in "
+                    f"[0, {num_classes - 1}], got [{min_id}, {max_id}]"
                 )
 
         masks_present = "masks" in targets[0]
@@ -107,7 +104,7 @@ class HungarianMatcher(nn.Module):
         # Compute the classification cost.
         alpha = 0.25
         gamma = 2.0
-        
+
         # neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         # pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
         # we refactor these with logsigmoid for numerical stability

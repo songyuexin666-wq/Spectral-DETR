@@ -1,6 +1,6 @@
 # ==================================================================================
 # Baseline配置  (Spectral-DETR)
-# GitHub: https://github.com/songyuexin666-wq/Sprectral-DETR
+# GitHub: https://github.com/songyuexin666-wq/Spectral-DETR
 # ==================================================================================
 # 用于消融实验对比（所有创新模块关闭，用作 RF-DETR 基线）
 
@@ -12,7 +12,7 @@ model:
   patch_size: 14
   num_queries: 300
   num_select: 300
-  
+
   # 所有创新点关闭 (纯RF-DETR基线)
   use_lue: false
   use_dafd: false
